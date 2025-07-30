@@ -9,58 +9,42 @@ import org.apache.spark.sql.SparkSession
 object MyHive {
   /**
    * 创建Spark会话连接到Hive
-   * @param jobName 作业名称，用于Spark应用标识
-   * @param masterUrl master URL (可选，默认null)
+   * 首先尝试创建标准连接，如果失败则创建本地连接
+   *
+   * @param jobNname 作业名称，用于Spark应用标识
    * @return 配置好的SparkSession实例
    */
-  def conn(implicit jobName: String = "DefaultName", masterUrl: String = null): SparkSession = {
+  def conn(implicit jobNname: String = "DefaultName"): SparkSession = {
     try {
-      println(s"正在创建SparkSession，应用名称: $jobName")
-
-      // 检查是否已有活跃的SparkSession
-      SparkSession.getActiveSession match {
-        case Some(existingSession) =>
-          println("发现现有SparkSession，复用现有会话")
-          return existingSession
-        case None =>
-          println("未发现现有SparkSession，创建新会话")
-      }
-
-      // 使用优化配置，防止YARN ApplicationMaster超时
-      val spark = SparkSession.builder()
-        .appName(jobName)
-        .enableHiveSupport()
+      // 尝试创建标准Spark会话
+      SparkSession.builder()
+        .appName(jobNname)
         .config("hive.exec.dynamic.partition.mode", "nonstrict")
         .config("hive.metastore.warehouse.dir", "/user/hive/warehouse")
         .config("hive.exec.max.dynamic.partitions", "20000")
-        .config("hive.metastore.uris", "thrift://cdh02:9083")
-        // 增加YARN相关配置，防止超时和内存溢出
-        .config("spark.yarn.am.waitTime", "300s")
-        .config("spark.yarn.am.memory", "2g")
-        .config("spark.driver.memory", "2g")
-        .config("spark.executor.memory", "2g")
-        .config("spark.driver.maxResultSize", "1g")
-        .config("spark.yarn.executor.memoryFraction", "0.6")
-        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        // 增加网络和超时配置
-        .config("spark.network.timeout", "800s")
-        .config("spark.rpc.askTimeout", "600s")
-        .config("spark.sql.broadcastTimeout", "36000")
-        // 优化内存管理
-        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
-        .config("spark.sql.execution.arrow.maxRecordsPerBatch", "1000")
+        .enableHiveSupport()
         .getOrCreate()
-
-      println(s"SparkSession创建成功，应用ID: ${spark.sparkContext.applicationId}")
-      spark
     } catch {
-      case e: Exception =>
-        println(s"创建SparkSession失败: ${e.getMessage}")
-        println(s"异常类型: ${e.getClass.getSimpleName}")
-        e.printStackTrace()
-        throw new RuntimeException("无法创建SparkSession，请检查配置", e)
+      case _: Exception =>
+        // 如果标准连接失败，创建本地连接
+        SparkSession.builder()
+          .appName(jobNname)
+          .master("local[*]")
+          .config("hive.metastore.uris", "thrift://cdh02:9083")
+          //          .config("hive.metastore.uris", "thrift://172.16.1.57:9083,thrift://172.16.1.60:9083,thrift://172.16.1.59:9083")
+          .config("hive.exec.max.dynamic.partitions", "20000")
+          //.config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
+
+          //.config("spark.sql.warehouse.dir", "hdfs://cdh01:10000,hdfs://cdh02:10000,hdfs://cdh03:10000")
+          .config("hive.exec.dynamic.partition.mode", "nonstrict")
+          .config("hive.metastore.warehouse.dir", "/user/hive/warehouse")
+          /*  .config("spark.mongodb.read.connection.uri", "mongodb://59.110.149.138:27017")
+            .config("spark.mongodb.read.database", "track")
+            .config("spark.mongodb.read.collection", "login_track")
+            .config("spark.mongodb.read.connection.uri", "mongodb://user:pass@host:port/?authSource=admin")
+  */
+          .enableHiveSupport()
+          .getOrCreate()
     }
   }
 }
