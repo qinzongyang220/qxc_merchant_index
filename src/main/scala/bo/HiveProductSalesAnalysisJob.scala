@@ -6,6 +6,7 @@ import org.apache.spark.sql.SparkSession
 
 import java.text.SimpleDateFormat
 import java.util.Calendar
+
 /**
  * Hive商品销售分析作业
  * 从Hive表中读取商品销售排行和访问转化率数据，按商店ID分组
@@ -45,7 +46,7 @@ object HiveProductSalesAnalysisJob {
       val endDate = yesterday
       
       println(s"分析时间范围: $startDate 至 $endDate")
-      println("按商店ID分组处理所有商店数据")
+      println("指定商店ID: 228")
       
       // 分页参数
       val pageSize = 10
@@ -75,6 +76,7 @@ object HiveProductSalesAnalysisJob {
         LEFT JOIN t_ods_tz_shop_detail sd ON sd.shop_id = p.shop_id
         WHERE o.is_payed = 'true' 
           AND p.status != '-1'
+          AND p.shop_id = '228'
           AND o.pay_time >= '$startDate 00:00:00' 
           AND o.pay_time <= '$endDate 23:59:59'
           AND oi.rec_time BETWEEN '$startDate 00:00:00' AND '$endDate 23:59:59'
@@ -91,7 +93,6 @@ object HiveProductSalesAnalysisJob {
           payCount,
           TO_DATE('$startDate') AS stat_date
       FROM sales_data
-      WHERE rank_num <= $pageSize
       ORDER BY shop_id, payAmount DESC
       """
       
@@ -141,7 +142,7 @@ object HiveProductSalesAnalysisJob {
         SELECT 
           prod_id,
           shop_id,
-          COUNT(*) AS visitor_num
+          MAX(expose_count) AS visitor_num
         FROM temp_exposure
         GROUP BY prod_id, shop_id
       ),
@@ -154,6 +155,7 @@ object HiveProductSalesAnalysisJob {
         LEFT JOIN t_ods_tz_order o ON o.order_number = oi.order_number
         WHERE oi.rec_time >= '$startDate 00:00:00' 
           AND oi.rec_time <= '$endDate 23:59:59'
+          AND o.shop_id = '228'
         GROUP BY oi.prod_id, o.shop_id
       ),
       conversion_data AS (
@@ -176,6 +178,8 @@ object HiveProductSalesAnalysisJob {
         LEFT JOIN t_ods_tz_shop_detail sd ON p.shop_id = sd.shop_id  -- 新增
         WHERE p.prod_name IS NOT NULL
           AND p.status != '-1'
+          AND p.shop_id = '228'
+          AND COALESCE(v.visitor_num, 0) > 0
         GROUP BY p.prod_id, p.shop_id, sd.shop_name, p.prod_name, p.pic, COALESCE(v.visitor_num, 0), COALESCE(pu.pay_user_count, 0)
       )
       
@@ -189,7 +193,6 @@ object HiveProductSalesAnalysisJob {
           visitorToPayRate,
           TO_DATE('$startDate') AS stat_date
       FROM conversion_data
-      WHERE rank_num <= $pageSize
       ORDER BY shop_id, visitorNum DESC
       """
       val visitorConversionDF = spark.sql(productVisitorConversionSQL)
@@ -261,6 +264,7 @@ object HiveProductSalesAnalysisJob {
           AND page_id = '1005'
           AND prodid IS NOT NULL
           AND shopid IS NOT NULL
+          AND shopid = '228'
         GROUP BY CAST(prodid AS BIGINT), CAST(shopid AS BIGINT)
       """
       

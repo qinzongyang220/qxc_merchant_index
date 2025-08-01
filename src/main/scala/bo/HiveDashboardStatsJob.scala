@@ -244,7 +244,7 @@ object HiveDashboardStatsJob {
           SELECT 
               toi.prod_id, 
               p.shop_id, 
-              NVL(SUM(NVL(CAST(tor.goods_num AS INT), CAST(toi.prod_count AS INT))),0) refund_count,
+              NVL(SUM(NVL(CAST(tor.goods_num AS INT), CAST(toi.prod_count AS INT))),0) AS refund_count,
               toi.prod_name AS refund_prod_name, 
               p.pic,
               TO_DATE('$yesterday') AS stat_date
