@@ -71,8 +71,16 @@ object HiveProductAnalysisQueryJob {
     val spark: SparkSession = MyHive.conn
 
     try {
-      // 设置Spark配置，增加显示字段数
+      // 设置Spark配置，增加显示字段数和连接稳定性
       spark.conf.set("spark.sql.debug.maxToStringFields", 10000)
+      // Hive连接重试和超时配置
+      spark.conf.set("hive.metastore.client.connect.retry.delay", "5")
+      spark.conf.set("hive.metastore.client.socket.timeout", "600")
+      spark.conf.set("hive.metastore.connect.retries", "10")
+      spark.conf.set("hive.metastore.failure.retries", "10")
+      // 设置网络超时和重试参数
+      spark.conf.set("spark.sql.hive.metastore.jars.path", "")
+      spark.conf.set("spark.hadoop.hive.metastore.uris", "thrift://cdh02:9083")
       
       println("成功连接到Hive")
       
@@ -88,12 +96,10 @@ object HiveProductAnalysisQueryJob {
       println(s"时间范围: ${timeRanges.mkString(", ")}")
       println(s"状态分区: ${statusFilters.mkString(", ")}")
       
-      // 对每个时间范围和状态组合执行查询
+      // 对每个时间范围处理所有状态，然后写入对应的表
       for (timeRange <- timeRanges) {
-        for (statusFilter <- statusFilters) {
-          println(s"\n处理时间范围: $timeRange, 状态过滤: $statusFilter")
-          processTimeRangeAndStatus(spark, timeRange, statusFilter)
-        }
+        println(s"\n处理时间范围: $timeRange")
+        processTimeRangeAllStatuses(spark, timeRange, statusFilters)
       }
       
       println("\n所有数据查询完成")
@@ -110,47 +116,103 @@ object HiveProductAnalysisQueryJob {
   }
   
   /**
-   * 处理指定时间范围和状态的数据
+   * 带重试机制的SQL执行方法
    */
-  def processTimeRangeAndStatus(spark: SparkSession, timeRangeType: String, statusFilter: String): Unit = {
+  def executeWithRetry(spark: SparkSession, sql: String, maxRetries: Int = 3): DataFrame = {
+    var lastException: Exception = null
+    for (attempt <- 1 to maxRetries) {
+      try {
+        println(s"执行SQL查询 (尝试 $attempt/$maxRetries)")
+        return spark.sql(sql)
+      } catch {
+        case e: Exception =>
+          lastException = e
+          println(s"第 $attempt 次尝试失败: ${e.getMessage}")
+          if (attempt < maxRetries) {
+            val waitTime = attempt * 5000 // 递增等待时间：5秒、10秒、15秒
+            println(s"等待 ${waitTime/1000} 秒后重试...")
+            Thread.sleep(waitTime)
+            
+            // 重新连接Hive MetaStore
+            try {
+              spark.sql("SHOW DATABASES").collect() // 测试连接
+              println("重新连接Hive MetaStore成功")
+            } catch {
+              case connEx: Exception =>
+                println(s"重新连接失败: ${connEx.getMessage}")
+            }
+          }
+      }
+    }
+    // 如果所有重试都失败，抛出最后一个异常
+    throw lastException
+  }
+  
+  /**
+   * 处理指定时间范围的所有状态数据
+   */
+  def processTimeRangeAllStatuses(spark: SparkSession, timeRangeType: String, statusFilters: List[String]): Unit = {
     try {
       // 计算时间范围
       val (startTime, endTime, dateStr) = calculateTimeRange(timeRangeType)
       
       println(s"分析时间范围: $startTime 至 $endTime")
+      var allDataFrames = List[org.apache.spark.sql.DataFrame]()
       
-      // 生成SQL查询
-      val productAnalysisSQL = generateProductAnalysisSQL(startTime, endTime, statusFilter, timeRangeType, dateStr)
-      
-      // 执行查询
-      val productAnalysisDF = spark.sql(productAnalysisSQL)
-      
-      val totalCount = productAnalysisDF.count()
-      println(s"查询执行完成，共分析了 $totalCount 条商品数据")
-      
-      // 去重处理，避免唯一索引冲突
-      val dedupDF = productAnalysisDF.dropDuplicates(Seq("prod_id", "shop_id", "stat_date", "status"))
-      val dedupCount = dedupDF.count()
-      
-      if (totalCount != dedupCount) {
-        println(s"去重处理：原始 $totalCount 条，去重后 $dedupCount 条，减少 ${totalCount - dedupCount} 条")
+      // 对每个状态执行查询
+      for (statusFilter <- statusFilters) {
+        println(s"处理状态: $statusFilter")
+        
+        // 生成SQL查询
+        val productAnalysisSQL = generateProductAnalysisSQL(startTime, endTime, statusFilter, timeRangeType, dateStr)
+        
+        // 执行查询，增加重试机制
+        val productAnalysisDF = executeWithRetry(spark, productAnalysisSQL, maxRetries = 3)
+        val totalCount = productAnalysisDF.count()
+        
+        if (totalCount > 0) {
+          println(s"状态 $statusFilter: $totalCount 条数据")
+          allDataFrames = allDataFrames :+ productAnalysisDF
+        } else {
+          println(s"状态 $statusFilter: 无数据")
+        }
       }
       
-      // 显示数据内容
-      if (dedupCount > 0) {
-        println(s"\n======= Hive商品分析数据 (共 $dedupCount 条) =======")
-        dedupDF.show(50, false)
+      // 合并所有状态的数据
+      if (allDataFrames.nonEmpty) {
+        val combinedDF = allDataFrames.reduce(_.union(_))
         
-        // TODO: 写入MySQL代码待实现
-        // writeToMySQL(dedupDF, "tz_bd_merchant_product_analysis", dateStr)
-        println(s"数据查询完成 (时间范围: $timeRangeType, 状态: $statusFilter)")
+        // 去重处理
+        val dedupDF = combinedDF.dropDuplicates(Seq("prod_id", "shop_id", "stat_date", "status_filter"))
+        val totalCount = combinedDF.count()
+        val dedupCount = dedupDF.count()
+        
+        println(s"\n$timeRangeType 总计: 原始 $totalCount 条，去重后 $dedupCount 条")
+        
+        if (dedupCount > 0) {
+          println(s"\n======= $timeRangeType 商品分析数据 (共 $dedupCount 条) =======")
+          dedupDF.show(20, false)
+          
+          // 写入对应的表
+          val tableName = timeRangeType match {
+            case "yesterday" => "tz_bd_merchant_product_analysis_yesterday"
+            case "7days" => "tz_bd_merchant_product_analysis_7days"
+            case "30days" => "tz_bd_merchant_product_analysis_30days"
+            case _ => throw new IllegalArgumentException(s"不支持的时间范围: $timeRangeType")
+          }
+          
+          writeToMySQL(dedupDF, tableName, dateStr)
+          println(s"$timeRangeType 数据写入完成")
+        } else {
+          println(s"$timeRangeType 无数据")
+        }
       } else {
-        println("没有数据")
+        println(s"$timeRangeType 所有状态都无数据")
       }
       
     } catch {
       case e: Exception => 
-        println(s"处理时间范围 $timeRangeType，状态 $statusFilter 时出错: ${e.getMessage}")
+        println(s"处理时间范围 $timeRangeType 时出错: ${e.getMessage}")
         e.printStackTrace()
     }
   }
@@ -179,7 +241,7 @@ object HiveProductAnalysisQueryJob {
         val startDate = dateFormat.format(cal.getTime())
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
-        (startTime, endTime, s"${startDate}至${endDate}")
+        (startTime, endTime, endDate) // 使用结束日期作为stat_date
         
       case "30days" =>
         // 近30天：过去30天，以昨天为终止日期
@@ -189,7 +251,7 @@ object HiveProductAnalysisQueryJob {
         val startDate = dateFormat.format(cal.getTime())
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
-        (startTime, endTime, s"${startDate}至${endDate}")
+        (startTime, endTime, endDate) // 使用结束日期作为stat_date
         
       case _ =>
         throw new IllegalArgumentException(s"不支持的时间范围类型: $timeRangeType")
@@ -245,7 +307,6 @@ object HiveProductAnalysisQueryJob {
         WHERE $exposureTimeCondition
           AND action = 'enter'
           AND page_id = '1005'
-          AND shopid = '228'
           AND prodid IS NOT NULL
         GROUP BY CAST(prodid AS BIGINT), CAST(shopid AS BIGINT)
       ),
@@ -262,7 +323,6 @@ object HiveProductAnalysisQueryJob {
         JOIN mall_bbc.t_ods_tz_order_item oi ON o.order_number = oi.order_number
         WHERE $orderTimeCondition
           AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
-          AND o.shop_id = '228'
         GROUP BY oi.prod_id, o.shop_id
       ),
       
@@ -279,7 +339,6 @@ object HiveProductAnalysisQueryJob {
         WHERE o.is_payed = 'true'
           AND $payTimeCondition
           AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
-          AND o.shop_id = '228'
         GROUP BY oi.prod_id, o.shop_id
       ),
       
@@ -296,7 +355,6 @@ object HiveProductAnalysisQueryJob {
         WHERE $refundTimeCondition
           AND r.refund_type = '2'
           AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
-          AND oi.shop_id = '228'
           AND oi.prod_id IS NOT NULL
           AND oi.shop_id IS NOT NULL
       ),
@@ -316,7 +374,6 @@ object HiveProductAnalysisQueryJob {
           AND r.refund_type = '1'
           AND $orderTimeCondition
           AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
-          AND o.shop_id = '228'
           AND oi.prod_id IS NOT NULL
           AND oi.shop_id IS NOT NULL
       ),
@@ -367,11 +424,9 @@ object HiveProductAnalysisQueryJob {
           ELSE 0
         END AS refund_success_rate,
         p.status AS status,
-        TO_DATE('$dateStr') AS stat_date,
+        '$dateStr' AS stat_date,
         -- 添加额外字段
-        '$timeRangeType' AS time_range_type,
         '$statusFilter' AS status_filter,
-        '$dateStr' AS date_range,
         p.prod_name AS prod_name,
         sd.shop_name AS shop_name
       FROM (
@@ -403,7 +458,6 @@ object HiveProductAnalysisQueryJob {
       LEFT JOIN pay_data pd ON p.prod_id = pd.prod_id AND p.shop_id = pd.shop_id
       LEFT JOIN refund_data rd ON p.prod_id = rd.prod_id AND p.shop_id = rd.shop_id
       WHERE $statusCondition
-        AND p.shop_id = '228'
         -- 过滤掉所有关键指标都为0的记录
         AND (COALESCE(pe.expose_count, 0) > 0 
           OR COALESCE(pe.expose_person_num, 0) > 0 
