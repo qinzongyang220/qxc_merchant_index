@@ -4,7 +4,6 @@ import dao.MyHive
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
-import java.sql.{Connection, DriverManager}
 import java.text.SimpleDateFormat
 import java.util.{Calendar, Date}
 
@@ -14,50 +13,17 @@ import java.util.{Calendar, Date}
  */
 object HiveDashboardStatsJob {
 
-  // MySQL连接配置
-  private val jdbcUrl = "jdbc:mysql://rm-2zedtr7h3427p19kcbo.mysql.rds.aliyuncs.com:3306/dlc_statistics?useSSL=false&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai"
-  private val jdbcUser = "bigdata_statistics"
-  private val jdbcPassword = "Y&%20Am1!"
-  private val jdbcDriver = "com.mysql.cj.jdbc.Driver"
-
   /**
    * 写入DataFrame到MySQL表
    */
   def writeToMySQL(df: DataFrame, tableName: String, statDate: String): Unit = {
-    var connection: Connection = null
     try {
-      // 1. 删除指定日期的现有数据
-      Class.forName(jdbcDriver)
-      connection = DriverManager.getConnection(jdbcUrl, jdbcUser, jdbcPassword)
-      val deleteSql = s"DELETE FROM `$tableName` WHERE stat_date = '$statDate'"
-      println(s"执行删除SQL: $deleteSql")
-      val statement = connection.createStatement()
-      val deletedRows = statement.executeUpdate(deleteSql)
-      println(s"从 $tableName 表中删除了 $deletedRows 行数据 (日期: $statDate)")
-
-      // 2. 插入新数据
-      df.write
-        .format("jdbc")
-        .option("url", jdbcUrl)
-        .option("dbtable", tableName)
-        .option("user", jdbcUser)
-        .option("password", jdbcPassword)
-        .option("driver", jdbcDriver)
-        .mode("append")
-        .save()
-      println(s"成功写入数据到 $tableName 表 (日期: $statDate)")
+      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = true)
     } catch {
       case e: Exception =>
         println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
         e.printStackTrace()
-    } finally {
-      if (connection != null) {
-        try {
-          connection.close()
-        } catch {
-          case e: Exception => e.printStackTrace()
-        }
-      }
+        throw e
     }
   }
 
@@ -178,8 +144,20 @@ object HiveDashboardStatsJob {
         println("订单支付数据主查询结果:")
         todayOrderPaymentDF.show(false)
         
+        // 添加详细调试信息
+        val dataCount = todayOrderPaymentDF.count()
+        println(s"准备写入数据行数: $dataCount")
+        if (dataCount > 0) {
+          println("数据sample：")
+          todayOrderPaymentDF.show(5, false)
+        } else {
+          println("警告：没有数据要写入！")
+        }
+        
         // 写入MySQL
+        println(s"开始写入表: tz_bd_merchant_daily_order_pay, 日期: $yesterday")
         writeToMySQL(todayOrderPaymentDF, "tz_bd_merchant_daily_order_pay", yesterday)
+        println("写入tz_bd_merchant_daily_order_pay完成")
       } catch {
         case e: Exception => 
           println(s"订单支付数据主查询执行失败: ${e.getMessage}")
@@ -228,8 +206,20 @@ object HiveDashboardStatsJob {
         println("订单支付统计查询结果:")
         orderPaymentDF.show(false)
         
+        // 添加详细调试信息
+        val orderPayCount = orderPaymentDF.count()
+        println(s"订单支付统计准备写入数据行数: $orderPayCount")
+        if (orderPayCount > 0) {
+          println("订单支付统计数据sample：")
+          orderPaymentDF.show(5, false)
+        } else {
+          println("警告：订单支付统计没有数据要写入！")
+        }
+        
         // 写入MySQL
+        println(s"开始写入表: tz_bd_merchant_order_pay_agg, 日期: $yesterday")
         writeToMySQL(orderPaymentDF, "tz_bd_merchant_order_pay_agg", yesterday)
+        println("写入tz_bd_merchant_order_pay_agg完成")
       } catch {
         case e: Exception => 
           println(s"订单支付统计查询执行失败: ${e.getMessage}")

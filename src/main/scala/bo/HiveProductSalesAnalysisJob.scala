@@ -2,7 +2,7 @@ package bo
 
 import dao.MyHive
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -11,6 +11,20 @@ import java.util.Calendar
  * 从Hive表中读取商品销售排行和访问转化率数据，按商店ID分组
  */
 object HiveProductSalesAnalysisJob {
+
+  /**
+   * 写入DataFrame到MySQL表
+   */
+  def writeToMySQL(df: DataFrame, tableName: String, statDate: String): Unit = {
+    try {
+      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = true)
+    } catch {
+      case e: Exception =>
+        println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
+        e.printStackTrace()
+        throw e
+    }
+  }
 
   def main(args: Array[String]): Unit = {
     // 设置日志级别
@@ -105,30 +119,8 @@ object HiveProductSalesAnalysisJob {
       println(s"销售排行数据去重: $beforeSalesCount -> $afterSalesCount 条记录")
       
       // 写入MySQL-商品销售排行
-      val jdbcUrl = "jdbc:mysql://rm-2zedtr7h3427p19kcbo.mysql.rds.aliyuncs.com:3306/dlc_statistics?useSSL=false&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai"
-      val jdbcUser = "bigdata_statistics"
-      val jdbcPassword = "Y&%20Am1!"
-      val jdbcDriver = "com.mysql.cj.jdbc.Driver"
       val salesTable = "tz_bd_merchant_product_sales_rank"
-      import java.sql.DriverManager
-      Class.forName(jdbcDriver)
-      val salesConn = DriverManager.getConnection(jdbcUrl, jdbcUser, jdbcPassword)
-      val delSalesSql = s"DELETE FROM `$salesTable` WHERE stat_date = '$startDate'"
-      println(s"执行删除SQL: $delSalesSql")
-      val salesStmt = salesConn.createStatement()
-      val delSalesRows = salesStmt.executeUpdate(delSalesSql)
-      println(s"从 $salesTable 表中删除了 $delSalesRows 行数据 (日期: $startDate)")
-      salesConn.close()
-      dedupSalesDF.write
-        .format("jdbc")
-        .option("url", jdbcUrl)
-        .option("dbtable", salesTable)
-        .option("user", jdbcUser)
-        .option("password", jdbcPassword)
-        .option("driver", jdbcDriver)
-        .mode("append")
-        .save()
-      println(s"成功写入数据到 $salesTable 表 (日期: $startDate)")
+      writeToMySQL(dedupSalesDF, salesTable, startDate)
       
       // 商品访问转化率
       println("执行商品访问转化率查询...")
@@ -206,24 +198,7 @@ object HiveProductSalesAnalysisJob {
       
       // 写入MySQL-商品访问转化率
       val visitorTable = "tz_bd_merchant_product_visitor_conversion"
-      Class.forName(jdbcDriver)
-      val visitorConn = DriverManager.getConnection(jdbcUrl, jdbcUser, jdbcPassword)
-      val delVisitorSql = s"DELETE FROM `$visitorTable` WHERE stat_date = '$startDate'"
-      println(s"执行删除SQL: $delVisitorSql")
-      val visitorStmt = visitorConn.createStatement()
-      val delVisitorRows = visitorStmt.executeUpdate(delVisitorSql)
-      println(s"从 $visitorTable 表中删除了 $delVisitorRows 行数据 (日期: $startDate)")
-      visitorConn.close()
-      dedupVisitorDF.write
-        .format("jdbc")
-        .option("url", jdbcUrl)
-        .option("dbtable", visitorTable)
-        .option("user", jdbcUser)
-        .option("password", jdbcPassword)
-        .option("driver", jdbcDriver)
-        .mode("append")
-        .save()
-      println(s"成功写入数据到 $visitorTable 表 (日期: $startDate)")
+      writeToMySQL(dedupVisitorDF, visitorTable, startDate)
       
       println("数据查询完成")
 

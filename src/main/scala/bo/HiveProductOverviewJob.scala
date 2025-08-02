@@ -171,33 +171,18 @@ object HiveProductOverviewJob {
       println("商品概况分析查询结果:")
       productOverviewDF.show(Int.MaxValue, false) // 显示所有行，不截断
       
-      // 写入MySQL
-      val jdbcUrl = "jdbc:mysql://rm-2zedtr7h3427p19kcbo.mysql.rds.aliyuncs.com:3306/dlc_statistics?useSSL=false&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai"
-      val jdbcUser = "bigdata_statistics"
-      val jdbcPassword = "Y&%20Am1!"
-      val jdbcDriver = "com.mysql.cj.jdbc.Driver"
+      // 写入MySQL（使用Constants）
       val tableName = "tz_bd_merchant_product_overview"
-      // 先删除该日期数据
-      import java.sql.DriverManager
-      Class.forName(jdbcDriver)
-      val connection = DriverManager.getConnection(jdbcUrl, jdbcUser, jdbcPassword)
-      val deleteSql = s"DELETE FROM `$tableName` WHERE stat_date = '$yesterday'"
-      println(s"执行删除SQL: $deleteSql")
-      val statement = connection.createStatement()
-      val deletedRows = statement.executeUpdate(deleteSql)
-      println(s"从 $tableName 表中删除了 $deletedRows 行数据 (日期: $yesterday)")
-      connection.close()
-      // 写入新数据
-      productOverviewDF.write
-        .format("jdbc")
-        .option("url", jdbcUrl)
-        .option("dbtable", tableName)
-        .option("user", jdbcUser)
-        .option("password", jdbcPassword)
-        .option("driver", jdbcDriver)
-        .mode("append")
-        .save()
-      println(s"成功写入数据到 $tableName 表 (日期范围: $yesterday 至 $yesterday)")
+      
+      try {
+        Constants.DatabaseUtils.writeDataFrameToMySQL(productOverviewDF, tableName, yesterday, deleteBeforeInsert = true)
+        println(s"成功写入数据到 $tableName 表 (日期: $yesterday)")
+      } catch {
+        case e: Exception =>
+          println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
+          e.printStackTrace()
+          throw e
+      }
       
       println("数据查询完成")
 
