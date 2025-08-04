@@ -164,6 +164,8 @@ object HiveProductOverviewJob {
       LEFT JOIN product_visitors pv ON s.shop_id = pv.shop_id
       LEFT JOIN order_items oi ON s.shop_id = oi.shop_id
       LEFT JOIN payment_items pi ON s.shop_id = pi.shop_id
+      WHERE s.shop_id IS NOT NULL 
+        AND s.shop_id != ''
       ORDER BY s.shop_id
       """
       

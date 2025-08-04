@@ -30,8 +30,8 @@ object MyHive {
         SparkSession.builder()
           .appName(jobNname)
           .master("local[*]")
-          .config("hive.metastore.uris", "thrift://cdh02:9083")
-          //          .config("hive.metastore.uris", "thrift://172.16.1.57:9083,thrift://172.16.1.60:9083,thrift://172.16.1.59:9083")
+          //          .config("hive.metastore.uris", "thrift://cdh02:9083")
+          .config("hive.metastore.uris", "thrift://172.16.1.57:9083,thrift://172.16.1.60:9083,thrift://172.16.1.59:9083")
           .config("hive.exec.max.dynamic.partitions", "20000")
           //.config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
 

@@ -135,6 +135,8 @@ object HiveDashboardStatsJob {
           WHERE 
               o.is_payed = 'true'
               AND o.pay_time LIKE '$yesterday%'
+              AND o.shop_id IS NOT NULL
+              AND o.shop_id != ''
           GROUP BY 
               o.shop_id
           ORDER BY 
@@ -180,6 +182,7 @@ object HiveDashboardStatsJob {
               SELECT shop_id, COUNT(*) AS pay_order_count, SUM(CAST(actual_total AS DECIMAL(18,2))) AS pay_actual_total
               FROM t_ods_tz_order
               WHERE is_payed = 'true' AND pay_time LIKE '$yesterday%'
+              AND shop_id IS NOT NULL AND shop_id != ''
               GROUP BY shop_id
               
               UNION ALL
@@ -190,6 +193,7 @@ object HiveDashboardStatsJob {
               SELECT shop_id, SUM(CAST(actual_total AS DECIMAL(18,2))) AS today_amount
               FROM t_ods_tz_order
               WHERE is_payed = 'true' AND pay_time LIKE '$yesterday%'
+              AND shop_id IS NOT NULL AND shop_id != ''
               GROUP BY shop_id
           ) b ON a.shop_id = b.shop_id
           LEFT JOIN (
@@ -198,6 +202,7 @@ object HiveDashboardStatsJob {
               WHERE is_payed = 'true' 
               AND pay_time BETWEEN '$firstDayOfMonth 00:00:00'
                              AND '$yesterday 23:59:59'
+              AND shop_id IS NOT NULL AND shop_id != ''
               GROUP BY shop_id
           ) c ON a.shop_id = c.shop_id
           ORDER BY a.shop_id
@@ -253,6 +258,8 @@ object HiveDashboardStatsJob {
                   AND TO_DATE(refund_time) = '$yesterday'
               )
           ))
+          AND p.shop_id IS NOT NULL 
+          AND p.shop_id != ''
           GROUP BY toi.prod_id, p.shop_id, toi.prod_name, p.pic
           ORDER BY refund_count DESC
           """)
@@ -280,6 +287,8 @@ object HiveDashboardStatsJob {
             FROM t_ods_tz_order_refund
             WHERE return_money_sts = 5
               AND TO_DATE(refund_time) = '$yesterday'
+              AND shop_id IS NOT NULL
+              AND shop_id != ''
             GROUP BY shop_id
           ),
           
@@ -296,6 +305,8 @@ object HiveDashboardStatsJob {
             LEFT JOIN refund_total rt ON a.shop_id = rt.shop_id
             WHERE a.return_money_sts = 5
               AND TO_DATE(a.refund_time) = '$yesterday'
+              AND a.shop_id IS NOT NULL
+              AND a.shop_id != ''
           ),
           
           product_pics AS (
@@ -348,6 +359,8 @@ object HiveDashboardStatsJob {
               FROM t_ods_tz_order_refund
               WHERE return_money_sts = 5
               AND TO_DATE(refund_time) = '$yesterday'
+              AND shop_id IS NOT NULL
+              AND shop_id != ''
               GROUP BY shop_id
           ),
           order_stats AS (
@@ -357,6 +370,8 @@ object HiveDashboardStatsJob {
               FROM t_ods_tz_order
               WHERE status >= 2
               AND TO_DATE(pay_time) = '$yesterday'
+              AND shop_id IS NOT NULL
+              AND shop_id != ''
               GROUP BY shop_id
           ),
           all_shops AS (

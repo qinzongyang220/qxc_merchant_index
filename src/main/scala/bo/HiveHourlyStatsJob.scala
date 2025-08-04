@@ -67,6 +67,8 @@ object HiveHourlyStatsJob {
         WHERE is_payed = 'true'
         AND pay_time >= '$startTime'
         AND pay_time <= '$endTime'
+        AND shop_id IS NOT NULL
+        AND shop_id != ''
         GROUP BY FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'yyyy-MM-dd'),
                  FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'HH'),
                  shop_id, TO_DATE(pay_time)

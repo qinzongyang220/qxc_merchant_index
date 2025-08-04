@@ -39,14 +39,7 @@ object HiveProductAnalysisQueryJob {
     try {
       // 设置Spark配置，增加显示字段数和连接稳定性
       spark.conf.set("spark.sql.debug.maxToStringFields", 10000)
-      // Hive连接重试和超时配置
-      spark.conf.set("hive.metastore.client.connect.retry.delay", "5")
-      spark.conf.set("hive.metastore.client.socket.timeout", "600")
-      spark.conf.set("hive.metastore.connect.retries", "10")
-      spark.conf.set("hive.metastore.failure.retries", "10")
-      // 设置网络超时和重试参数
-      spark.conf.set("spark.sql.hive.metastore.jars.path", "")
-      spark.conf.set("spark.hadoop.hive.metastore.uris", "thrift://cdh02:9083")
+      // Hive连接重试和超时配置已在MyHive中统一配置
       
       println("成功连接到Hive")
       
@@ -424,6 +417,8 @@ object HiveProductAnalysisQueryJob {
       LEFT JOIN pay_data pd ON p.prod_id = pd.prod_id AND p.shop_id = pd.shop_id
       LEFT JOIN refund_data rd ON p.prod_id = rd.prod_id AND p.shop_id = rd.shop_id
       WHERE $statusCondition
+        AND p.shop_id IS NOT NULL
+        AND p.shop_id != ''
         -- 过滤掉所有关键指标都为0的记录
         AND (COALESCE(pe.expose_count, 0) > 0 
           OR COALESCE(pe.expose_person_num, 0) > 0 
