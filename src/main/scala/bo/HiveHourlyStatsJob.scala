@@ -5,7 +5,12 @@ import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.text.SimpleDateFormat
-import java.util.{Calendar, Date}
+import java.util.Calendar
+
+/**
+ * 商城按小时统计作业
+ * 按小时分区统计昨天一天的订单支付数据，生成24小时的统计数据
+ */
 object HiveHourlyStatsJob {
 
   /**
@@ -32,27 +37,24 @@ object HiveHourlyStatsJob {
     val spark: SparkSession = MyHive.conn
 
     try {
-      // 设置时间范围为最近一小时
+      // 设置时间范围为昨天一天，按小时分区
       val dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
-      val hourFormat = new SimpleDateFormat("HH")
       val dayFormat = new SimpleDateFormat("yyyy-MM-dd")
 
-      val now = new Date()
-      val currentDay = dayFormat.format(now)
-      val currentHour = hourFormat.format(now)
-
       val cal = Calendar.getInstance()
-      cal.add(Calendar.HOUR_OF_DAY, -1) // 减去1小时
-      val oneHourAgo = dateFormat.format(cal.getTime())
-      val currentTime = dateFormat.format(now)
+      cal.add(Calendar.DAY_OF_MONTH, -1) // 减去1天，获取昨天
+      val yesterday = dayFormat.format(cal.getTime())
+      
+      val startTime = s"$yesterday 00:00:00"
+      val endTime = s"$yesterday 23:59:59"
 
-      println(s"处理时间范围: $oneHourAgo 至 $currentTime")
-      println(s"当前小时: $currentHour")
+      println(s"处理昨天按小时分区数据，日期: $yesterday")
+      println(s"时间范围: $startTime 至 $endTime")
 
       // 切换到mall_bbc数据库
       spark.sql("USE mall_bbc")
 
-      // 按小时统计订单支付金额查询 - 最近一小时的数据
+      // 按小时统计订单支付金额查询 - 昨天一天的数据，按小时分区
       val hourlyOrderPaymentSQL = s"""
         SELECT 
             FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'yyyy-MM-dd') AS order_date, 
@@ -60,11 +62,11 @@ object HiveHourlyStatsJob {
             shop_id, 
             COUNT(*) AS order_count,
             SUM(CAST(actual_total AS DECIMAL(18,2))) as pay_actual_total,
-            TO_DATE(pay_time) AS stat_date
+            TO_DATE('$yesterday') AS stat_date
         FROM t_ods_tz_order
         WHERE is_payed = 'true'
-        AND pay_time >= '$oneHourAgo'
-        AND pay_time <= '$currentTime'
+        AND pay_time >= '$startTime'
+        AND pay_time <= '$endTime'
         GROUP BY FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'yyyy-MM-dd'),
                  FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'HH'),
                  shop_id, TO_DATE(pay_time)
@@ -76,10 +78,9 @@ object HiveHourlyStatsJob {
       hourlyOrderPaymentDF.show(50, false)
       
       // 写入MySQL
-      val currentDate = dayFormat.format(now)
-      writeToMySQL(hourlyOrderPaymentDF, "tz_bd_merchant_hourly_stats", currentDate)
+      writeToMySQL(hourlyOrderPaymentDF, "tz_bd_merchant_hourly_stats", yesterday)
       
-      println(s"小时($currentDay $currentHour:00)的订单支付数据处理完成")
+      println(s"昨天($yesterday)按小时分区的订单支付数据处理完成")
 
     } catch {
       case e: Exception => 
