@@ -16,15 +16,151 @@ object HiveProductAnalysisQueryJob {
   /**
    * 写入DataFrame到MySQL表
    */
-  def writeToMySQL(df: DataFrame, tableName: String, statDate: String): Unit = {
+  def writeToMySQL(df: DataFrame, tableName: String, statDate: String, timeRangeType: String): Unit = {
     try {
-      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = true)
+      // 检查并创建表
+      ensureTableExists(tableName, timeRangeType)
+      
+      // 根据时间范围类型执行不同的删除策略
+      val deleteStrategy = timeRangeType match {
+        case "7days" | "30days" =>
+          // 7天和30天：删除全部数据
+          "DELETE_ALL"
+        case "thisMonth" =>
+          // 自然月：只删除当前月份的数据
+          val cal = Calendar.getInstance()
+          val year = cal.get(Calendar.YEAR)
+          val month = f"${cal.get(Calendar.MONTH) + 1}%02d"
+          s"DELETE_BY_MONTH:$year-$month"
+        case _ => "DELETE_ALL"
+      }
+      
+      // 执行删除策略
+      executeDeleteStrategy(tableName, deleteStrategy)
+      
+      // 写入数据（不自动删除，因为我们已经手动删除了）
+      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = false)
     } catch {
       case e: Exception =>
         println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
         e.printStackTrace()
         throw e
     }
+  }
+  
+  /**
+   * 执行删除策略
+   */
+  def executeDeleteStrategy(tableName: String, deleteStrategy: String): Unit = {
+    try {
+      val connection = Constants.DatabaseUtils.getWriteConnection
+      val stmt = connection.createStatement()
+      
+      // 检查表是否存在
+      val checkTableSQL = s"SHOW TABLES LIKE '$tableName'"
+      val rs = stmt.executeQuery(checkTableSQL)
+      val tableExists = rs.next()
+      rs.close()
+      
+      if (tableExists) {
+        val deleteSQL = if (deleteStrategy == "DELETE_ALL") {
+          s"DELETE FROM $tableName"
+        } else if (deleteStrategy.startsWith("DELETE_BY_MONTH:")) {
+          val monthPattern = deleteStrategy.substring("DELETE_BY_MONTH:".length)
+          s"DELETE FROM $tableName WHERE stat_date LIKE '$monthPattern%'"
+        } else {
+          throw new IllegalArgumentException(s"未知的删除策略: $deleteStrategy")
+        }
+        
+        println(s"执行删除策略: $deleteSQL")
+        val deletedRows = stmt.executeUpdate(deleteSQL)
+        println(s"删除了 $deletedRows 行数据")
+      } else {
+        println(s"表 $tableName 不存在，跳过删除策略")
+      }
+      
+      stmt.close()
+      connection.close()
+    } catch {
+      case e: Exception =>
+        println(s"执行删除策略时出错: ${e.getMessage}")
+        throw e
+    }
+  }
+  
+  /**
+   * 确保表存在，如果不存在则创建
+   */
+  def ensureTableExists(tableName: String, timeRangeType: String): Unit = {
+    try {
+      val connection = Constants.DatabaseUtils.getWriteConnection
+      val stmt = connection.createStatement()
+      
+      // 检查表是否存在
+      val checkTableSQL = s"SHOW TABLES LIKE '$tableName'"
+      val rs = stmt.executeQuery(checkTableSQL)
+      
+      if (!rs.next()) {
+        // 表不存在，创建表
+        println(s"表 $tableName 不存在，正在创建...")
+        val createTableSQL = generateCreateTableSQL(tableName, timeRangeType)
+        stmt.execute(createTableSQL)
+        println(s"表 $tableName 创建成功")
+      }
+      
+      rs.close()
+      stmt.close()
+      connection.close()
+    } catch {
+      case e: Exception =>
+        println(s"检查/创建表 $tableName 时出错: ${e.getMessage}")
+        throw e
+    }
+  }
+  
+  /**
+   * 生成建表SQL
+   */
+  def generateCreateTableSQL(tableName: String, timeRangeType: String): String = {
+    val comment = timeRangeType match {
+      case "7days" => "商品洞察-7天"
+      case "30days" => "商品洞察-30天" 
+      case "thisMonth" => "商品洞察-自然月"
+      case _ => "商品洞察"
+    }
+    
+    s"""
+    CREATE TABLE `$tableName` (
+      `id` BIGINT(20) NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+      `prod_id` BIGINT(20) NOT NULL COMMENT '商品ID',
+      `shop_id` BIGINT(20) NOT NULL COMMENT '商店ID',
+      `price` DECIMAL(18,2) DEFAULT NULL COMMENT '商品价格',
+      `expose` BIGINT(20) DEFAULT 0 COMMENT '曝光次数',
+      `expose_person_num` BIGINT(20) DEFAULT 0 COMMENT '曝光人数',
+      `place_order_person` BIGINT(20) DEFAULT 0 COMMENT '下单人数',
+      `pay_person` BIGINT(20) DEFAULT 0 COMMENT '支付人数',
+      `place_order_num` BIGINT(20) DEFAULT 0 COMMENT '下单件数',
+      `pay_num` BIGINT(20) DEFAULT 0 COMMENT '支付件数',
+      `place_order_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '下单金额',
+      `pay_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '支付金额',
+      `single_prod_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '单品转化率(%)',
+      `refund_num` BIGINT(20) DEFAULT 0 COMMENT '申请退款订单数',
+      `refund_person` BIGINT(20) DEFAULT 0 COMMENT '申请退款人数',
+      `refund_success_num` BIGINT(20) DEFAULT 0 COMMENT '成功退款订单数',
+      `refund_success_person` BIGINT(20) DEFAULT 0 COMMENT '成功退款人数',
+      `refund_success_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '成功退款金额',
+      `refund_success_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '退款成功率(%)',
+      `status` INT(11) DEFAULT NULL COMMENT '商品状态',
+      `status_filter` VARCHAR(50) DEFAULT NULL COMMENT '状态过滤器',
+      `prod_name` VARCHAR(500) DEFAULT NULL COMMENT '商品名称',
+      `shop_name` VARCHAR(200) DEFAULT NULL COMMENT '商店名称',
+      `stat_date` DATE NOT NULL COMMENT '统计日期',
+      PRIMARY KEY (`id`),
+      UNIQUE KEY `uk_prod_shop_statdate_status` (`prod_id`, `shop_id`, `stat_date`, `status_filter`),
+      KEY `idx_stat_date` (`stat_date`),
+      KEY `idx_shop_id` (`shop_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='$comment'
+    """.trim
   }
 
   def main(args: Array[String]): Unit = {
@@ -48,8 +184,8 @@ object HiveProductAnalysisQueryJob {
       println("当前使用数据库: mall_bbc")
       
       // 定义时间范围类型和状态分区（适合离线数据）
-      val timeRanges = List("yesterday", "7days", "30days") // 移除today和thisMonth
-      val statusFilters = List("全部", "出售中", "仓库中", "已售空")
+      val timeRanges = List("7days", "30days", "thisMonth")
+      val statusFilters = List(0, 1, 2, 3)
       
       println("开始执行Hive商品分析查询...")
       println(s"时间范围: ${timeRanges.mkString(", ")}")
@@ -110,7 +246,7 @@ object HiveProductAnalysisQueryJob {
   /**
    * 处理指定时间范围的所有状态数据
    */
-  def processTimeRangeAllStatuses(spark: SparkSession, timeRangeType: String, statusFilters: List[String]): Unit = {
+  def processTimeRangeAllStatuses(spark: SparkSession, timeRangeType: String, statusFilters: List[Int]): Unit = {
     try {
       // 计算时间范围
       val (startTime, endTime, dateStr) = calculateTimeRange(timeRangeType)
@@ -154,13 +290,18 @@ object HiveProductAnalysisQueryJob {
           
           // 写入对应的表
           val tableName = timeRangeType match {
-            case "yesterday" => "tz_bd_merchant_product_analysis_yesterday"
-            case "7days" => "tz_bd_merchant_product_analysis_7days"
-            case "30days" => "tz_bd_merchant_product_analysis_30days"
+            case "7days" => "tz_bd_merchant_product_analysis_7"
+            case "30days" => "tz_bd_merchant_product_analysis_30"
+            case "thisMonth" => 
+              // 动态生成月份表名（去掉下划线）
+              val cal = Calendar.getInstance()
+              val year = cal.get(Calendar.YEAR)
+              val month = f"${cal.get(Calendar.MONTH) + 1}%02d" // Calendar.MONTH从0开始
+              s"tz_bd_merchant_product_analysis_${year}${month}"
             case _ => throw new IllegalArgumentException(s"不支持的时间范围: $timeRangeType")
           }
           
-          writeToMySQL(dedupDF, tableName, dateStr)
+          writeToMySQL(dedupDF, tableName, dateStr, timeRangeType)
           println(s"$timeRangeType 数据写入完成")
         } else {
           println(s"$timeRangeType 无数据")
@@ -184,33 +325,53 @@ object HiveProductAnalysisQueryJob {
     val cal = Calendar.getInstance()
     
     timeRangeType match {
-      case "yesterday" =>
-        // 昨天
-        cal.add(Calendar.DAY_OF_MONTH, -1)
+      case "thisMonth" =>
+        // 自然月：本月1号到昨天
+        val today = cal.getTime()
+        cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
         val yesterday = dateFormat.format(cal.getTime())
-        val startTime = s"$yesterday 00:00:00"
+        
+        cal.setTime(today) // 恢复到今天
+        cal.set(Calendar.DAY_OF_MONTH, 1) // 设置到本月1号
+        val monthStart = dateFormat.format(cal.getTime())
+        
+        val startTime = s"$monthStart 00:00:00"
         val endTime = s"$yesterday 23:59:59"
-        (startTime, endTime, yesterday)
+        
+        // 分区使用今天日期（运行时间）
+        cal.setTime(today)
+        val runDate = dateFormat.format(cal.getTime())
+        (startTime, endTime, runDate)
         
       case "7days" =>
         // 近7天：过去7天，以昨天为终止日期
+        val today = cal.getTime()
         cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
         val endDate = dateFormat.format(cal.getTime())
         cal.add(Calendar.DAY_OF_MONTH, -6) // 再往前6天，总共7天
         val startDate = dateFormat.format(cal.getTime())
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
-        (startTime, endTime, endDate) // 使用结束日期作为stat_date
+        
+        // 分区使用今天日期（运行时间）
+        cal.setTime(today)
+        val runDate = dateFormat.format(cal.getTime())
+        (startTime, endTime, runDate)
         
       case "30days" =>
         // 近30天：过去30天，以昨天为终止日期
+        val today = cal.getTime()
         cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
         val endDate = dateFormat.format(cal.getTime())
         cal.add(Calendar.DAY_OF_MONTH, -29) // 再往前29天，总共30天
         val startDate = dateFormat.format(cal.getTime())
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
-        (startTime, endTime, endDate) // 使用结束日期作为stat_date
+        
+        // 分区使用今天日期（运行时间）
+        cal.setTime(today)
+        val runDate = dateFormat.format(cal.getTime())
+        (startTime, endTime, runDate)
         
       case _ =>
         throw new IllegalArgumentException(s"不支持的时间范围类型: $timeRangeType")
@@ -220,13 +381,13 @@ object HiveProductAnalysisQueryJob {
   /**
    * 生成商品分析SQL（使用新埋点数据）
    */
-  def generateProductAnalysisSQL(startTime: String, endTime: String, statusFilter: String, timeRangeType: String, dateStr: String): String = {
+  def generateProductAnalysisSQL(startTime: String, endTime: String, statusFilter: Int, timeRangeType: String, dateStr: String): String = {
     // 根据状态过滤条件生成WHERE子句
     val statusCondition = statusFilter match {
-      case "全部" => "p.status > '-1'"  // 全部商品（除删除外）
-      case "出售中" => "p.status = '1'"   // 出售中
-      case "仓库中" => "p.status = '0'"   // 仓库中
-      case "已售空" => "p.status = '3'"   // 已售空
+      case 0 => "p.status > '-1'"  // 全部商品（除删除外）
+      case 1 => "p.status = '1'"   // 出售中
+      case 2 => "p.status = '0'"   // 仓库中
+      case 3 => "p.status = '3'"   // 已售空
       case _ => "p.status > '-1'"
     }
     
@@ -385,7 +546,7 @@ object HiveProductAnalysisQueryJob {
         p.status AS status,
         '$dateStr' AS stat_date,
         -- 添加额外字段
-        '$statusFilter' AS status_filter,
+        $statusFilter AS status_filter,
         p.prod_name AS prod_name,
         sd.shop_name AS shop_name
       FROM (
