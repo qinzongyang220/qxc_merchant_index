@@ -2,6 +2,7 @@ package bo
 
 import dao.MyHive
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.text.SimpleDateFormat
@@ -18,9 +19,6 @@ object HiveRealtimeProductAnalysisJob {
    */
   def writeToMySQL(df: DataFrame, tableName: String, statDate: String): Unit = {
     try {
-      // 检查并创建表
-      ensureTableExists(tableName)
-      
       // 删除全部数据然后写入新数据
       Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = true)
       
@@ -33,73 +31,6 @@ object HiveRealtimeProductAnalysisJob {
     }
   }
   
-  /**
-   * 确保表存在，如果不存在则创建
-   */
-  def ensureTableExists(tableName: String): Unit = {
-    try {
-      val connection = Constants.DatabaseUtils.getWriteConnection
-      val stmt = connection.createStatement()
-      
-      // 检查表是否存在
-      val checkTableSQL = s"SHOW TABLES LIKE '$tableName'"
-      val rs = stmt.executeQuery(checkTableSQL)
-      
-      if (!rs.next()) {
-        // 表不存在，创建表
-        println(s"表 $tableName 不存在，正在创建...")
-        val createTableSQL = generateCreateTableSQL(tableName)
-        stmt.execute(createTableSQL)
-        println(s"表 $tableName 创建成功")
-      }
-      
-      rs.close()
-      stmt.close()
-      connection.close()
-    } catch {
-      case e: Exception =>
-        println(s"检查/创建表 $tableName 时出错: ${e.getMessage}")
-        throw e
-    }
-  }
-  
-  /**
-   * 生成建表SQL
-   */
-  def generateCreateTableSQL(tableName: String): String = {
-    s"""
-    CREATE TABLE `$tableName` (
-      `id` BIGINT(20) NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-      `prod_id` BIGINT(20) NOT NULL COMMENT '商品ID',
-      `shop_id` BIGINT(20) NOT NULL COMMENT '商店ID',
-      `price` DECIMAL(18,2) DEFAULT NULL COMMENT '商品价格',
-      `expose` BIGINT(20) DEFAULT 0 COMMENT '曝光次数',
-      `expose_person_num` BIGINT(20) DEFAULT 0 COMMENT '曝光人数',
-      `place_order_person` BIGINT(20) DEFAULT 0 COMMENT '下单人数',
-      `pay_person` BIGINT(20) DEFAULT 0 COMMENT '支付人数',
-      `place_order_num` BIGINT(20) DEFAULT 0 COMMENT '下单件数',
-      `pay_num` BIGINT(20) DEFAULT 0 COMMENT '支付件数',
-      `place_order_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '下单金额',
-      `pay_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '支付金额',
-      `single_prod_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '单品转化率(%)',
-      `refund_num` BIGINT(20) DEFAULT 0 COMMENT '申请退款订单数',
-      `refund_person` BIGINT(20) DEFAULT 0 COMMENT '申请退款人数',
-      `refund_success_num` BIGINT(20) DEFAULT 0 COMMENT '成功退款订单数',
-      `refund_success_person` BIGINT(20) DEFAULT 0 COMMENT '成功退款人数',
-      `refund_success_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '成功退款金额',
-      `refund_success_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '退款成功率(%)',
-      `status` INT(11) DEFAULT NULL COMMENT '商品状态',
-      `status_filter` VARCHAR(50) DEFAULT NULL COMMENT '状态过滤器',
-      `prod_name` VARCHAR(500) DEFAULT NULL COMMENT '商品名称',
-      `shop_name` VARCHAR(200) DEFAULT NULL COMMENT '商店名称',
-      `stat_date` DATE NOT NULL COMMENT '统计日期',
-      PRIMARY KEY (`id`),
-      UNIQUE KEY `uk_prod_shop_statdate_status` (`prod_id`, `shop_id`, `stat_date`, `status_filter`),
-      KEY `idx_stat_date` (`stat_date`),
-      KEY `idx_shop_id` (`shop_id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商品洞察-今日自然日'
-    """.trim
-  }
 
   def main(args: Array[String]): Unit = {
     // 设置日志级别
@@ -128,8 +59,12 @@ object HiveRealtimeProductAnalysisJob {
       println(s"分析当天数据: $today")
       println(s"分析时间范围: $startTime 至 $endTime")
 
-      // 处理实时数据
-      processRealtimeData(spark, startTime, endTime, today)
+      // 定义状态分区（与HiveProductAnalysisQueryJob保持一致）
+      val statusFilters = List(0, 1, 2, 3)
+      println(s"状态分区: ${statusFilters.mkString(", ")}")
+      
+      // 处理实时数据（所有状态）
+      processRealtimeDataAllStatuses(spark, startTime, endTime, today, statusFilters)
 
       println("\n实时数据查询完成")
 
@@ -185,23 +120,51 @@ object HiveRealtimeProductAnalysisJob {
   }
 
   /**
-   * 处理实时数据（以商品表为主表）
+   * 处理实时数据（所有状态）
    */
-  def processRealtimeData(spark: SparkSession, startTime: String, endTime: String, dateStr: String): Unit = {
+  def processRealtimeDataAllStatuses(spark: SparkSession, startTime: String, endTime: String, dateStr: String, statusFilters: List[Int]): Unit = {
     try {
-      // 生成SQL查询
-      val productAnalysisSQL = generateRealtimeAnalysisSQL(startTime, endTime, dateStr)
-
-      // 执行查询
-      val productAnalysisDF = executeWithRetry(spark, productAnalysisSQL, maxRetries = 3)
-      val totalCount = productAnalysisDF.count()
-
-      if (totalCount > 0) {
-        println(s"\n======= 实时商品分析数据 (共 $totalCount 条) =======")
-        productAnalysisDF.show(50, false)
+      var allDataFrames = List[DataFrame]()
+      
+      // 对每个状态执行查询
+      for (statusFilter <- statusFilters) {
+        println(s"\n处理状态: $statusFilter")
         
-        // 写入MySQL
-        writeToMySQL(productAnalysisDF, "tz_bd_merchant_product_analysis_0", dateStr)
+        // 生成SQL查询
+        val productAnalysisSQL = generateRealtimeAnalysisSQL(startTime, endTime, dateStr, statusFilter)
+
+        // 执行查询
+        val productAnalysisDF = executeWithRetry(spark, productAnalysisSQL, maxRetries = 3)
+        val totalCount = productAnalysisDF.count()
+
+        if (totalCount > 0) {
+          println(s"状态 $statusFilter: $totalCount 条数据")
+          allDataFrames = allDataFrames :+ productAnalysisDF
+        } else {
+          println(s"状态 $statusFilter: 无数据")
+        }
+      }
+      
+      // 合并所有状态的数据
+      if (allDataFrames.nonEmpty) {
+        val combinedDF = allDataFrames.reduce(_.union(_))
+        
+        // 去重处理并排序，强制单分区以保持顺序
+        val dedupDF = combinedDF.dropDuplicates(Seq("prod_id", "shop_id", "stat_date", "status_filter"))
+          .orderBy(col("status_filter"), col("expose").desc)
+          .coalesce(1)
+        val totalCount = combinedDF.count()
+        val dedupCount = dedupDF.count()
+        
+        println(s"\n实时数据总计: 原始 $totalCount 条，去重后 $dedupCount 条")
+        
+        if (dedupCount > 0) {
+          println(s"\n======= 实时商品分析数据 (共 $dedupCount 条) =======")
+          dedupDF.show(50, false)
+          
+          // 写入MySQL
+          writeToMySQL(dedupDF, "tz_bd_merchant_product_analysis_0", dateStr)
+        }
       } else {
         println("当天无数据")
       }
@@ -216,7 +179,15 @@ object HiveRealtimeProductAnalysisJob {
   /**
    * 生成实时商品分析SQL（以商品表为主表）
    */
-  def generateRealtimeAnalysisSQL(startTime: String, endTime: String, dateStr: String): String = {
+  def generateRealtimeAnalysisSQL(startTime: String, endTime: String, dateStr: String, statusFilter: Int): String = {
+    // 根据状态过滤条件生成WHERE子句
+    val statusCondition = statusFilter match {
+      case 0 => "p.status > '-1'"  // 全部商品（除删除外）
+      case 1 => "p.status = '1'"   // 出售中
+      case 2 => "p.status = '0'"   // 仓库中
+      case 3 => "p.status = '3'"   // 已售空
+      case _ => "p.status > '-1'"
+    }
     s"""
       -- Hive实时商品分析查询SQL (以商品表为主表)
 
@@ -252,7 +223,7 @@ object HiveRealtimeProductAnalysisJob {
         END AS refund_success_rate,
         -- 状态和额外字段
         COALESCE(pi.status, oi.status, p.status, 0) as status,
-        'today' AS status_filter,
+        $statusFilter AS status_filter,
         COALESCE(p.prod_name, oi.prod_name, CONCAT('商品_', p.prod_id)) as prod_name,
         COALESCE(sd.shop_name, CONCAT('商家_', p.shop_id)) AS shop_name,
         '$dateStr' AS stat_date
@@ -380,6 +351,7 @@ object HiveRealtimeProductAnalysisJob {
       ) rd ON p.prod_id = rd.prod_id AND p.shop_id = rd.shop_id
       WHERE p.shop_id IS NOT NULL
         AND p.shop_id != ''
+        AND $statusCondition
         -- 过滤掉所有关键指标都为0的记录
         AND (COALESCE(pe.expose_count, 0) > 0 
           OR COALESCE(pe.expose_person_num, 0) > 0 
@@ -391,7 +363,7 @@ object HiveRealtimeProductAnalysisJob {
           OR COALESCE(pd.pay_amount, 0) > 0
           OR COALESCE(rd.refund_num, 0) > 0
           OR COALESCE(rd.refund_success_amount, 0) > 0)
-      ORDER BY COALESCE(pe.expose_count, 0) DESC, COALESCE(od.order_amount, 0) DESC
+      ORDER BY status_filter ASC, COALESCE(pe.expose_count, 0) DESC, COALESCE(od.order_amount, 0) DESC
       """
   }
 }

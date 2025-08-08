@@ -8,7 +8,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 /**
  * Hive商品概况分析作业
- * 从Hive表中读取商品概况数据，只分析昨天的数据，按商店ID分组
+ * 从Hive表中读取商品概况数据，支持7天、30天、自然月多时间范围，按商店ID分组
  */
 object HiveProductOverviewJob {
 
@@ -31,161 +31,19 @@ object HiveProductOverviewJob {
       spark.sql("USE mall_bbc")
       println("当前使用数据库: mall_bbc")
       
-      // 获取昨天的日期
-      val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
-      val cal = Calendar.getInstance()
-      cal.add(Calendar.DAY_OF_MONTH, -1) // 昨天
-      val yesterday = dateFormat.format(cal.getTime())
+      // 定义时间范围类型
+      val timeRanges = List("7days", "30days", "thisMonth")
       
-      println(s"分析日期范围: $yesterday 至 $yesterday")
-      println("按商店ID分组处理所有商店数据")
+      println("开始执行Hive商品概况分析...")
+      println(s"时间范围: ${timeRanges.mkString(", ")}")
       
-      // 临时注册埋点视图
-      registerExposureView(spark, yesterday, yesterday)
-      
-      // 执行商品概况分析查询
-      println("执行商品概况分析查询...")
-      val productOverviewSQL = s"""
-      -- 商品概况分析SQL，分析一周的数据，按商店ID分组
-      WITH 
-      -- 基础商品信息（新增商品）
-      new_products AS (
-          SELECT 
-              shop_id,
-              COUNT(prod_id) AS newProd
-          FROM mall_bbc.t_ods_tz_prod
-          WHERE status != '-1' 
-              AND create_time BETWEEN '$yesterday 00:00:00' AND '$yesterday 23:59:59'
-          GROUP BY shop_id
-      ),
-      
-      -- 被访问商品数
-      visited_products AS (
-          SELECT 
-              shop_id,
-              COUNT(DISTINCT prod_id) AS visitedProd
-          FROM temp_exposure
-          GROUP BY shop_id
-      ),
-      
-      -- 动销商品数
-      dynamic_sales AS (
-          SELECT 
-              o.shop_id,
-              COUNT(DISTINCT oi.prod_id) AS dynamicSale
-          FROM mall_bbc.t_ods_tz_order o
-          LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
-              ON o.order_number = oi.order_number
-          WHERE o.create_time >= '$yesterday 00:00:00'
-              AND o.create_time <= '$yesterday 23:59:59'
-          GROUP BY o.shop_id
-      ),
-      
-      -- 商品曝光数和浏览数
-      product_exposure AS (
-          SELECT 
-              shop_id,
-              SUM(expose_count) AS expose,
-              SUM(expose_count) AS browse  -- 使用相同的数据来源
-          FROM temp_exposure
-          GROUP BY shop_id
-      ),
-      
-      -- 商品访客数
-      product_visitors AS (
-          SELECT 
-              shop_id,
-              COUNT(DISTINCT uuid) AS visitor
-          FROM temp_exposure_users
-          GROUP BY shop_id
-      ),
-      
-      -- 下单件数
-      order_items AS (
-          SELECT 
-              o.shop_id,
-              SUM(CAST(oi.prod_count AS INT)) AS orderNum
-          FROM mall_bbc.t_ods_tz_order o
-          LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
-              ON o.order_number = oi.order_number
-          WHERE o.create_time >= '$yesterday 00:00:00'
-              AND o.create_time <= '$yesterday 23:59:59'
-          GROUP BY o.shop_id
-      ),
-      
-      -- 支付件数
-      payment_items AS (
-          SELECT 
-              o.shop_id,
-              SUM(CASE WHEN o.is_payed = 'true' THEN CAST(oi.prod_count AS INT) ELSE 0 END) AS payNum
-          FROM mall_bbc.t_ods_tz_order o
-          LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
-              ON o.order_number = oi.order_number
-          WHERE o.create_time >= '$yesterday 00:00:00'
-              AND o.create_time <= '$yesterday 23:59:59'
-          GROUP BY o.shop_id
-      ),
-      
-      -- 所有商店ID列表（确保结果中包含所有相关商店）
-      all_shops AS (
-          SELECT shop_id FROM new_products
-          UNION
-          SELECT shop_id FROM visited_products
-          UNION
-          SELECT shop_id FROM dynamic_sales
-          UNION
-          SELECT shop_id FROM product_exposure
-          UNION
-          SELECT shop_id FROM product_visitors
-          UNION
-          SELECT shop_id FROM order_items
-          UNION
-          SELECT shop_id FROM payment_items
-      )
-      
-      -- 最终查询，合并所有数据
-      SELECT 
-          s.shop_id,
-          COALESCE(np.newProd, 0) AS newProd,
-          COALESCE(vp.visitedProd, 0) AS visitedProd,
-          COALESCE(ds.dynamicSale, 0) AS dynamicSale,
-          COALESCE(pe.expose, 0) AS expose,
-          COALESCE(pe.browse, 0) AS browse,
-          COALESCE(pv.visitor, 0) AS visitor,
-          COALESCE(oi.orderNum, 0) AS orderNum,
-          COALESCE(pi.payNum, 0) AS payNum,
-          '$yesterday' AS stat_date
-      FROM 
-          all_shops s
-      LEFT JOIN new_products np ON s.shop_id = np.shop_id
-      LEFT JOIN visited_products vp ON s.shop_id = vp.shop_id
-      LEFT JOIN dynamic_sales ds ON s.shop_id = ds.shop_id
-      LEFT JOIN product_exposure pe ON s.shop_id = pe.shop_id
-      LEFT JOIN product_visitors pv ON s.shop_id = pv.shop_id
-      LEFT JOIN order_items oi ON s.shop_id = oi.shop_id
-      LEFT JOIN payment_items pi ON s.shop_id = pi.shop_id
-      WHERE s.shop_id IS NOT NULL 
-        AND s.shop_id != ''
-      ORDER BY s.shop_id
-      """
-      
-      val productOverviewDF = spark.sql(productOverviewSQL)
-      println("商品概况分析查询结果:")
-      productOverviewDF.show(Int.MaxValue, false) // 显示所有行，不截断
-      
-      // 写入MySQL（使用Constants）
-      val tableName = "tz_bd_merchant_product_overview"
-      
-      try {
-        Constants.DatabaseUtils.writeDataFrameToMySQL(productOverviewDF, tableName, yesterday, deleteBeforeInsert = true)
-        println(s"成功写入数据到 $tableName 表 (日期: $yesterday)")
-      } catch {
-        case e: Exception =>
-          println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
-          e.printStackTrace()
-          throw e
+      // 对每个时间范围执行查询
+      for (timeRange <- timeRanges) {
+        println(s"\n处理时间范围: $timeRange")
+        processTimeRange(spark, timeRange)
       }
       
+      println("\n所有时间范围数据查询完成")
       println("数据查询完成")
 
     } catch {
@@ -198,6 +56,260 @@ object HiveProductOverviewJob {
       println("Spark会话已关闭")
     }
   }
+  
+  /**
+   * 处理指定时间范围的数据
+   */
+  def processTimeRange(spark: SparkSession, timeRangeType: String): Unit = {
+    try {
+      // 计算时间范围
+      val (startTime, endTime, dateStr, timePeriod) = calculateTimeRange(timeRangeType)
+      
+      println(s"分析时间范围: $startTime 至 $endTime")
+      
+      // 临时注册埋点视图
+      registerExposureView(spark, startTime.split(" ")(0), endTime.split(" ")(0))
+      
+      // 执行商品概况分析查询
+      println("执行商品概况分析查询...")
+      val productOverviewSQL = generateProductOverviewSQL(startTime, endTime, timePeriod, dateStr)
+      
+      val productOverviewDF = spark.sql(productOverviewSQL)
+      val totalCount = productOverviewDF.count()
+      
+      if (totalCount > 0) {
+        println(s"======= $timeRangeType 商品概况分析查询结果 (共 $totalCount 条) =======")
+        productOverviewDF.show(Int.MaxValue, false) // 显示所有行，不截断
+        
+        // 写入MySQL
+        Constants.DatabaseUtils.writeDataFrameToMySQL(productOverviewDF, "tz_bd_merchant_product_overview", dateStr, deleteBeforeInsert = true)
+        println("数据成功写入MySQL表: tz_bd_merchant_product_overview")
+        
+      } else {
+        println(s"$timeRangeType 无商品概况数据")
+      }
+      
+    } catch {
+      case e: Exception => 
+        println(s"处理时间范围 $timeRangeType 时出错: ${e.getMessage}")
+        e.printStackTrace()
+    }
+  }
+  
+  /**
+   * 计算时间范围
+   */
+  def calculateTimeRange(timeRangeType: String): (String, String, String, String) = {
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val cal = Calendar.getInstance()
+    val today = dateFormat.format(cal.getTime()) // 运行时间（今天）
+    
+    timeRangeType match {
+      case "7days" =>
+        // 近7天：过去7天，以昨天为终止日期，但stat_date使用运行时间
+        cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
+        val endDate = dateFormat.format(cal.getTime())
+        cal.add(Calendar.DAY_OF_MONTH, -6) // 再往前6天，总共7天
+        val startDate = dateFormat.format(cal.getTime())
+        val startTime = s"$startDate 00:00:00"
+        val endTime = s"$endDate 23:59:59"
+        (startTime, endTime, today, "7") // 使用运行时间作为stat_date
+        
+      case "30days" =>
+        // 近30天：过去30天，以昨天为终止日期，但stat_date使用运行时间
+        cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
+        val endDate = dateFormat.format(cal.getTime())
+        cal.add(Calendar.DAY_OF_MONTH, -29) // 再往前29天，总共30天
+        val startDate = dateFormat.format(cal.getTime())
+        val startTime = s"$startDate 00:00:00"
+        val endTime = s"$endDate 23:59:59"
+        (startTime, endTime, today, "30") // 使用运行时间作为stat_date
+        
+      case "thisMonth" =>
+        // 自然月：如果今天是1号，分析上个月完整数据；否则分析本月1号到昨天的数据
+        val todayDate = cal.getTime()
+        val todayDay = cal.get(Calendar.DAY_OF_MONTH)
+        
+        if (todayDay == 1) {
+          // 月初第一天：分析上个月完整数据
+          cal.add(Calendar.MONTH, -1) // 回到上个月
+          val prevMonth = cal.getTime()
+          
+          // 上个月1号
+          cal.set(Calendar.DAY_OF_MONTH, 1)
+          val prevMonthStart = dateFormat.format(cal.getTime())
+          
+          // 上个月最后一天
+          cal.setTime(prevMonth)
+          cal.set(Calendar.DAY_OF_MONTH, cal.getActualMaximum(Calendar.DAY_OF_MONTH))
+          val prevMonthEnd = dateFormat.format(cal.getTime())
+          
+          // 生成上个月的标识符 (YYYYMM)
+          val year = cal.get(Calendar.YEAR)
+          val month = f"${cal.get(Calendar.MONTH) + 1}%02d"
+          val monthId = s"$year$month"
+          
+          val startTime = s"$prevMonthStart 00:00:00"
+          val endTime = s"$prevMonthEnd 23:59:59"
+          
+          (startTime, endTime, prevMonthEnd, monthId)
+        } else {
+          // 月中其他日期：分析本月1号到昨天的数据
+          cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
+          val yesterday = dateFormat.format(cal.getTime())
+          
+          cal.setTime(todayDate) // 恢复到今天
+          cal.set(Calendar.DAY_OF_MONTH, 1) // 设置到本月1号
+          val monthStart = dateFormat.format(cal.getTime())
+          
+          // 生成当前月份的标识符 (YYYYMM)
+          val year = cal.get(Calendar.YEAR)
+          val month = f"${cal.get(Calendar.MONTH) + 1}%02d"
+          val monthId = s"$year$month"
+          
+          val startTime = s"$monthStart 00:00:00"
+          val endTime = s"$yesterday 23:59:59"
+          
+          (startTime, endTime, yesterday, monthId)
+        }
+        
+      case _ =>
+        throw new IllegalArgumentException(s"不支持的时间范围类型: $timeRangeType")
+    }
+  }
+  
+  /**
+   * 生成商品概况分析SQL
+   */
+  def generateProductOverviewSQL(startTime: String, endTime: String, timePeriod: String, dateStr: String): String = {
+    s"""
+    -- 商品概况分析SQL ($timePeriod)，按商店ID分组
+    WITH 
+    -- 基础商品信息（新增商品）
+    new_products AS (
+        SELECT 
+            shop_id,
+            COUNT(prod_id) AS newProd
+        FROM mall_bbc.t_ods_tz_prod
+        WHERE status != '-1' 
+            AND create_time BETWEEN '$startTime' AND '$endTime'
+        GROUP BY shop_id
+    ),
+    
+    -- 被访问商品数
+    visited_products AS (
+        SELECT 
+            shop_id,
+            COUNT(DISTINCT prod_id) AS visitedProd
+        FROM temp_exposure
+        GROUP BY shop_id
+    ),
+    
+    -- 动销商品数
+    dynamic_sales AS (
+        SELECT 
+            o.shop_id,
+            COUNT(DISTINCT oi.prod_id) AS dynamicSale
+        FROM mall_bbc.t_ods_tz_order o
+        LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
+            ON o.order_number = oi.order_number
+        WHERE o.create_time >= '$startTime'
+            AND o.create_time <= '$endTime'
+        GROUP BY o.shop_id
+    ),
+    
+    -- 商品曝光数和浏览数
+    product_exposure AS (
+        SELECT 
+            shop_id,
+            SUM(expose_count) AS expose,
+            SUM(expose_count) AS browse  -- 使用相同的数据来源
+        FROM temp_exposure
+        GROUP BY shop_id
+    ),
+    
+    -- 商品访客数
+    product_visitors AS (
+        SELECT 
+            shop_id,
+            COUNT(DISTINCT uuid) AS visitor
+        FROM temp_exposure_users
+        GROUP BY shop_id
+    ),
+    
+    -- 下单件数
+    order_items AS (
+        SELECT 
+            o.shop_id,
+            SUM(CAST(oi.prod_count AS INT)) AS orderNum
+        FROM mall_bbc.t_ods_tz_order o
+        LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
+            ON o.order_number = oi.order_number
+        WHERE o.create_time >= '$startTime'
+            AND o.create_time <= '$endTime'
+        GROUP BY o.shop_id
+    ),
+    
+    -- 支付件数
+    payment_items AS (
+        SELECT 
+            o.shop_id,
+            SUM(CASE WHEN o.is_payed = 'true' THEN CAST(oi.prod_count AS INT) ELSE 0 END) AS payNum
+        FROM mall_bbc.t_ods_tz_order o
+        LEFT JOIN mall_bbc.t_ods_tz_order_item oi 
+            ON o.order_number = oi.order_number
+        WHERE o.create_time >= '$startTime'
+            AND o.create_time <= '$endTime'
+        GROUP BY o.shop_id
+    ),
+    
+    -- 所有商店ID列表（确保结果中包含所有相关商店）
+    all_shops AS (
+        SELECT shop_id FROM new_products
+        UNION
+        SELECT shop_id FROM visited_products
+        UNION
+        SELECT shop_id FROM dynamic_sales
+        UNION
+        SELECT shop_id FROM product_exposure
+        UNION
+        SELECT shop_id FROM product_visitors
+        UNION
+        SELECT shop_id FROM order_items
+        UNION
+        SELECT shop_id FROM payment_items
+    )
+    
+    -- 最终查询，合并所有数据
+    SELECT 
+        s.shop_id,
+        COALESCE(oi.orderNum, 0) AS orderNum,
+        COALESCE(pi.payNum, 0) AS payNum,
+        COALESCE(ds.dynamicSale, 0) AS dynamicSale,
+        COALESCE(np.newProd, 0) AS newProd,
+        COALESCE(vp.visitedProd, 0) AS visitedProd,
+        COALESCE(pe.expose, 0) AS expose,
+        COALESCE(pe.browse, 0) AS browse,
+        COALESCE(pv.visitor, 0) AS visitor,
+        '$timePeriod' AS time_period,
+        '$dateStr' AS stat_date
+    FROM 
+        all_shops s
+    LEFT JOIN new_products np ON s.shop_id = np.shop_id
+    LEFT JOIN visited_products vp ON s.shop_id = vp.shop_id
+    LEFT JOIN dynamic_sales ds ON s.shop_id = ds.shop_id
+    LEFT JOIN product_exposure pe ON s.shop_id = pe.shop_id
+    LEFT JOIN product_visitors pv ON s.shop_id = pv.shop_id
+    LEFT JOIN order_items oi ON s.shop_id = oi.shop_id
+    LEFT JOIN payment_items pi ON s.shop_id = pi.shop_id
+    WHERE s.shop_id IS NOT NULL 
+      AND s.shop_id != ''
+    ORDER BY s.shop_id
+    """
+  }
+  
+  
+  
   
   /**
    * 注册临时视图，用于分析埋点数据

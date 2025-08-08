@@ -38,7 +38,7 @@ object HiveProductAnalysisQueryJob {
       // 执行删除策略
       executeDeleteStrategy(tableName, deleteStrategy)
       
-      // 写入数据（不自动删除，因为我们已经手动删除了）
+      // 简化版本：直接写入数据
       Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = false)
     } catch {
       case e: Exception =>
@@ -293,11 +293,22 @@ object HiveProductAnalysisQueryJob {
             case "7days" => "tz_bd_merchant_product_analysis_7"
             case "30days" => "tz_bd_merchant_product_analysis_30"
             case "thisMonth" => 
-              // 动态生成月份表名（去掉下划线）
+              // 根据运行日期决定表名
               val cal = Calendar.getInstance()
-              val year = cal.get(Calendar.YEAR)
-              val month = f"${cal.get(Calendar.MONTH) + 1}%02d" // Calendar.MONTH从0开始
-              s"tz_bd_merchant_product_analysis_${year}${month}"
+              val todayDay = cal.get(Calendar.DAY_OF_MONTH)
+              
+              if (todayDay == 1) {
+                // 1号运行：使用上个月作为表名
+                cal.add(Calendar.MONTH, -1) // 回到上个月
+                val year = cal.get(Calendar.YEAR)
+                val month = f"${cal.get(Calendar.MONTH) + 1}%02d"
+                s"tz_bd_merchant_product_analysis_${year}${month}"
+              } else {
+                // 其他日期运行：使用当前月份作为表名
+                val year = cal.get(Calendar.YEAR)
+                val month = f"${cal.get(Calendar.MONTH) + 1}%02d"
+                s"tz_bd_merchant_product_analysis_${year}${month}"
+              }
             case _ => throw new IllegalArgumentException(s"不支持的时间范围: $timeRangeType")
           }
           
@@ -326,22 +337,42 @@ object HiveProductAnalysisQueryJob {
     
     timeRangeType match {
       case "thisMonth" =>
-        // 自然月：本月1号到昨天
+        // 自然月：如果今天是1号，分析上个月完整数据；否则分析本月1号到昨天的数据
         val today = cal.getTime()
-        cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
-        val yesterday = dateFormat.format(cal.getTime())
+        val todayDay = cal.get(Calendar.DAY_OF_MONTH)
         
-        cal.setTime(today) // 恢复到今天
-        cal.set(Calendar.DAY_OF_MONTH, 1) // 设置到本月1号
-        val monthStart = dateFormat.format(cal.getTime())
-        
-        val startTime = s"$monthStart 00:00:00"
-        val endTime = s"$yesterday 23:59:59"
-        
-        // 分区使用今天日期（运行时间）
-        cal.setTime(today)
-        val runDate = dateFormat.format(cal.getTime())
-        (startTime, endTime, runDate)
+        if (todayDay == 1) {
+          // 月初第一天：分析上个月完整数据
+          cal.add(Calendar.MONTH, -1) // 回到上个月
+          val prevMonth = cal.getTime()
+          
+          // 上个月1号
+          cal.set(Calendar.DAY_OF_MONTH, 1)
+          val prevMonthStart = dateFormat.format(cal.getTime())
+          
+          // 上个月最后一天
+          cal.setTime(prevMonth)
+          cal.set(Calendar.DAY_OF_MONTH, cal.getActualMaximum(Calendar.DAY_OF_MONTH))
+          val prevMonthEnd = dateFormat.format(cal.getTime())
+          
+          val startTime = s"$prevMonthStart 00:00:00"
+          val endTime = s"$prevMonthEnd 23:59:59"
+          
+          (startTime, endTime, prevMonthEnd)
+        } else {
+          // 月中其他日期：分析本月1号到昨天的数据
+          cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
+          val yesterday = dateFormat.format(cal.getTime())
+          
+          cal.setTime(today) // 恢复到今天
+          cal.set(Calendar.DAY_OF_MONTH, 1) // 设置到本月1号
+          val monthStart = dateFormat.format(cal.getTime())
+          
+          val startTime = s"$monthStart 00:00:00"
+          val endTime = s"$yesterday 23:59:59"
+          
+          (startTime, endTime, yesterday)
+        }
         
       case "7days" =>
         // 近7天：过去7天，以昨天为终止日期
@@ -591,7 +622,7 @@ object HiveProductAnalysisQueryJob {
           OR COALESCE(pd.pay_amount, 0) > 0
           OR COALESCE(rd.refund_num, 0) > 0
           OR COALESCE(rd.refund_success_amount, 0) > 0)
-      ORDER BY COALESCE(pe.expose_count, 0) DESC
+      ORDER BY status_filter ASC, COALESCE(pe.expose_count, 0) DESC
       """
   }
 }

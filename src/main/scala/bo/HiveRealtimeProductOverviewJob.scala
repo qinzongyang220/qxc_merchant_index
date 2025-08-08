@@ -2,7 +2,7 @@ package bo
 
 import dao.MyHive
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.SparkSession
 
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -50,18 +50,18 @@ object HiveRealtimeProductOverviewJob {
       -- 商品概况实时分析SQL，使用Hive增量表，参考ProductOverviewJob查询结构
       SELECT 
           orders.shop_id,
-          orders.orderNum,
-          orders.payNum,
-          orders.dynamicSale,
-          COALESCE(products.newProd, 0) AS newProd,
+          orders.orderNum AS order_num,
+          orders.payNum AS pay_num,
+          orders.dynamicSale AS dynamic_sale,
+          COALESCE(products.newProd, 0) AS new_prod,
           -- 被访问商品数（使用埋点数据）
-          COALESCE(visited.visitedProd, 0) AS visitedProd,
+          COALESCE(visited.visitedProd, 0) AS visited_prod,
           -- 商品曝光数（使用埋点数据）
           COALESCE(exposure.expose, 0) AS expose,
           COALESCE(exposure.browse, 0) AS browse,
           -- 商品访客数（使用埋点数据）
           COALESCE(visitors.visitor, 0) AS visitor,
-          '自然日' AS time_period,
+          '0' AS time_period,
           '$today' AS stat_date
           
       FROM (
@@ -121,18 +121,18 @@ object HiveRealtimeProductOverviewJob {
       -- 只有新增商品但没有订单的商店
       SELECT 
           products_only.shop_id,
-          0 AS orderNum,
-          0 AS payNum, 
-          0 AS dynamicSale,
-          products_only.newProd,
+          0 AS order_num,
+          0 AS pay_num, 
+          0 AS dynamic_sale,
+          products_only.newProd AS new_prod,
           -- 被访问商品数（使用埋点数据）
-          COALESCE(visited_only.visitedProd, 0) AS visitedProd,
+          COALESCE(visited_only.visitedProd, 0) AS visited_prod,
           -- 商品曝光数（使用埋点数据）
           COALESCE(exposure_only.expose, 0) AS expose,
           COALESCE(exposure_only.browse, 0) AS browse,
           -- 商品访客数（使用埋点数据）
           COALESCE(visitors_only.visitor, 0) AS visitor,
-          '自然日' AS time_period,
+          '0' AS time_period,
           '$today' AS stat_date
           
       FROM (
@@ -192,7 +192,8 @@ object HiveRealtimeProductOverviewJob {
       }
       
       // 写入MySQL
-      writeToMySQL(productOverviewDF, "tz_bd_merchant_product_overview", today)
+      Constants.DatabaseUtils.writeDataFrameToMySQL(productOverviewDF, "tz_bd_merchant_product_overview", today, deleteBeforeInsert = true)
+      println("数据成功写入MySQL表: tz_bd_merchant_product_overview")
       
       println("数据查询和写入完成")
 
@@ -266,70 +267,6 @@ object HiveRealtimeProductOverviewJob {
     }
   }
   
-  /**
-   * 写入MySQL数据
-   */
-  def writeToMySQL(df: DataFrame, tableName: String, statDate: String): Unit = {
-    try {
-      ensureTableExists(tableName)
-      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = true)
-      println(s"数据成功写入MySQL表: $tableName")
-    } catch {
-      case e: Exception =>
-        println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
-        e.printStackTrace()
-        throw e
-    }
-  }
   
-  /**
-   * 确保MySQL表存在
-   */
-  def ensureTableExists(tableName: String): Unit = {
-    val connection = Constants.DatabaseUtils.getWriteConnection
-    try {
-      val statement = connection.createStatement()
-      
-      // 检查表是否存在
-      val checkTableSQL = s"SHOW TABLES LIKE '$tableName'"
-      val resultSet = statement.executeQuery(checkTableSQL)
-      
-      if (!resultSet.next()) {
-        // 表不存在，创建表
-        println(s"表 $tableName 不存在，正在创建...")
-        val createTableSQL = generateCreateTableSQL(tableName)
-        statement.execute(createTableSQL)
-        println(s"表 $tableName 创建成功")
-      }
-      
-      resultSet.close()
-      statement.close()
-    } finally {
-      connection.close()
-    }
-  }
   
-  /**
-   * 生成创建表的SQL
-   */
-  def generateCreateTableSQL(tableName: String): String = {
-    s"""
-      CREATE TABLE IF NOT EXISTS `$tableName` (
-        `shop_id` BIGINT NOT NULL COMMENT '商店ID',
-        `orderNum` INT DEFAULT 0 COMMENT '下单件数',
-        `payNum` INT DEFAULT 0 COMMENT '支付件数',
-        `dynamicSale` INT DEFAULT 0 COMMENT '动销商品数',
-        `newProd` INT DEFAULT 0 COMMENT '新增商品数',
-        `visitedProd` INT DEFAULT 0 COMMENT '被访问商品数',
-        `expose` BIGINT DEFAULT 0 COMMENT '商品曝光数',
-        `browse` BIGINT DEFAULT 0 COMMENT '商品浏览数',
-        `visitor` INT DEFAULT 0 COMMENT '商品访客数',
-        `time_period` VARCHAR(255) DEFAULT NULL COMMENT '时间段选择(近7天,近30天，自然日，自然月)',
-        `stat_date` DATE NOT NULL COMMENT '统计日期',
-        PRIMARY KEY (`shop_id`, `stat_date`, `time_period`),
-        KEY `idx_stat_date` (`stat_date`),
-        KEY `idx_time_period` (`time_period`)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='商家商品概况分析表'
-    """
-  }
 } 
