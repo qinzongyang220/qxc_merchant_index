@@ -2,15 +2,57 @@ package bo
 
 import dao.MyHive
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.text.SimpleDateFormat
 import java.util.Calendar
+
 /**
  * Hive商品概况分析作业
  * 从Hive表中读取商品概况数据，支持7天、30天、自然月多时间范围，按商店ID分组
  */
 object HiveProductOverviewJob {
+
+  /**
+   * 写入DataFrame到MySQL表，支持基于时间周期的删除条件
+   */
+  def writeToMySQLWithTimePeriod(df: DataFrame, tableName: String, statDate: String, timePeriod: String): Unit = {
+    try {
+      val connection = Constants.DatabaseUtils.getWriteConnection
+      val stmt = connection.createStatement()
+      
+      // 根据时间周期使用不同的删除条件
+      val deleteSQL = timePeriod match {
+        case "7" =>
+          // 7天数据：只保留最新一份，删除所有7天数据
+          s"DELETE FROM `$tableName` WHERE time_period = '7'"
+        case "30" =>
+          // 30天数据：只保留最新一份，删除所有30天数据
+          s"DELETE FROM `$tableName` WHERE time_period = '30'"
+        case monthId if monthId.matches("\\d{6}") =>
+          // 自然月（YYYYMM格式）：删除当前月份的数据，保留其他月份
+          s"DELETE FROM `$tableName` WHERE time_period = '$timePeriod'"
+        case _ =>
+          // 其他情况：只删除相同stat_date的数据
+          s"DELETE FROM `$tableName` WHERE stat_date = '$statDate'"
+      }
+      
+      println(s"执行删除SQL: $deleteSQL")
+      val deletedRows = stmt.executeUpdate(deleteSQL)
+      println(s"从 $tableName 表中删除了 $deletedRows 行数据 (日期: $statDate, 时间周期: $timePeriod)")
+      
+      stmt.close()
+      connection.close()
+      
+      // 写入新数据
+      Constants.DatabaseUtils.writeDataFrameToMySQL(df, tableName, statDate, deleteBeforeInsert = false)
+    } catch {
+      case e: Exception =>
+        println(s"写入MySQL表 $tableName 时出错: ${e.getMessage}")
+        e.printStackTrace()
+        throw e
+    }
+  }
 
   def main(args: Array[String]): Unit = {
     // 设置日志级别
@@ -81,8 +123,8 @@ object HiveProductOverviewJob {
         println(s"======= $timeRangeType 商品概况分析查询结果 (共 $totalCount 条) =======")
         productOverviewDF.show(Int.MaxValue, false) // 显示所有行，不截断
         
-        // 写入MySQL
-        Constants.DatabaseUtils.writeDataFrameToMySQL(productOverviewDF, "tz_bd_merchant_product_overview", dateStr, deleteBeforeInsert = true)
+        // 写入MySQL，使用基于时间周期的删除条件
+        writeToMySQLWithTimePeriod(productOverviewDF, "tz_bd_merchant_product_overview", dateStr, timePeriod)
         println("数据成功写入MySQL表: tz_bd_merchant_product_overview")
         
       } else {
@@ -283,11 +325,11 @@ object HiveProductOverviewJob {
     -- 最终查询，合并所有数据
     SELECT 
         s.shop_id,
-        COALESCE(oi.orderNum, 0) AS orderNum,
-        COALESCE(pi.payNum, 0) AS payNum,
-        COALESCE(ds.dynamicSale, 0) AS dynamicSale,
-        COALESCE(np.newProd, 0) AS newProd,
-        COALESCE(vp.visitedProd, 0) AS visitedProd,
+        COALESCE(oi.orderNum, 0) AS order_num,
+        COALESCE(pi.payNum, 0) AS pay_num,
+        COALESCE(ds.dynamicSale, 0) AS dynamic_sale,
+        COALESCE(np.newProd, 0) AS new_prod,
+        COALESCE(vp.visitedProd, 0) AS visited_prod,
         COALESCE(pe.expose, 0) AS expose,
         COALESCE(pe.browse, 0) AS browse,
         COALESCE(pv.visitor, 0) AS visitor,
