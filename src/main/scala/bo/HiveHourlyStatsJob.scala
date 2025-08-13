@@ -102,7 +102,7 @@ object HiveHourlyStatsJob {
             COUNT(*) AS order_count,
             SUM(CAST(actual_total AS DECIMAL(18,2))) as pay_actual_total,
             '$today' AS stat_date
-        FROM t_ods_tz_order_inc
+        FROM t_dwd_order_inc
         WHERE is_payed = '1'
         AND pay_time >= '$startTime'
         AND pay_time <= '$endTime'
