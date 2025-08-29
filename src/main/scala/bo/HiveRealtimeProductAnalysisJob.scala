@@ -1,10 +1,9 @@
 package bo
 
-import dao.MyHive
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.{DataFrame, SparkSession}
-
+import dao.MyHive
 import java.text.SimpleDateFormat
 import java.util.Calendar
 
@@ -51,20 +50,21 @@ object HiveRealtimeProductAnalysisJob {
       spark.sql("USE mall_bbc")
       println("当前使用数据库: mall_bbc")
 
-      // 只处理当天数据
-      val today = getTodayDate()
-      val startTime = s"$today 00:00:00"
-      val endTime = s"$today 23:59:59"
+      // 跨天处理逻辑
+      val (startTime, endTime, processDate, currentHour) = getTimeRange()
 
-      println(s"分析当天数据: $today")
-      println(s"分析时间范围: $startTime 至 $endTime")
+      println(s"分析实时数据: $processDate")
+      println(s"时间范围: $startTime 至 $endTime (当前小时: $currentHour)")
+      
+      // 显示时间范围说明
+      displayTimeRanges(startTime, endTime)
 
       // 定义状态分区（与HiveProductAnalysisQueryJob保持一致）
       val statusFilters = List(0, 1, 2, 3)
       println(s"状态分区: ${statusFilters.mkString(", ")}")
       
       // 处理实时数据（所有状态）
-      processRealtimeDataAllStatuses(spark, startTime, endTime, today, statusFilters)
+      processRealtimeDataAllStatuses(spark, startTime, endTime, processDate, statusFilters)
 
       println("\n实时数据查询完成")
 
@@ -79,6 +79,15 @@ object HiveRealtimeProductAnalysisJob {
     }
   }
 
+  /**
+   * 显示时间范围说明
+   */
+  def displayTimeRanges(startTime: String, endTime: String): Unit = {
+    println("\n======= 时间范围说明 =======")
+    println(s"实时数据 (跨天处理): $startTime 至 $endTime")
+    println("==========================\n")
+  }
+  
   /**
    * 获取今天日期
    */
@@ -180,13 +189,13 @@ object HiveRealtimeProductAnalysisJob {
    * 生成实时商品分析SQL（以商品表为主表）
    */
   def generateRealtimeAnalysisSQL(startTime: String, endTime: String, dateStr: String, statusFilter: Int): String = {
-    // 根据状态过滤条件生成WHERE子句
+    // 根据状态过滤条件生成WHERE子句，统一处理为字符串比较，最后转换为数字
     val statusCondition = statusFilter match {
-      case 0 => "p.status > '-1'"  // 全部商品（除删除外）
-      case 1 => "p.status = '1'"   // 出售中
-      case 2 => "p.status = '0'"   // 仓库中
-      case 3 => "p.status = '3'"   // 已售空
-      case _ => "p.status > '-1'"
+      case 0 => "CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) > -1"  // 全部商品（除删除外）
+      case 1 => "CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) = 1"   // 出售中
+      case 2 => "CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) = 0"   // 仓库中
+      case 3 => "CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) = 3"   // 已售空
+      case _ => "CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) > -1"
     }
     s"""
       -- Hive实时商品分析查询SQL (以商品表为主表)
@@ -195,22 +204,32 @@ object HiveRealtimeProductAnalysisJob {
         p.prod_id,
         p.shop_id,
         COALESCE(CAST(p.price AS DECIMAL(18,2)), CAST(oi.price AS DECIMAL(18,2)), 0) as price,
-        -- 使用MySQL表中的字段名
+        CAST(p.supplier_price AS DECIMAL(18,2)) AS supplier_price,
+        
+        -- 曝光指标
         COALESCE(pe.expose_count, 0) AS expose,
         COALESCE(pe.expose_person_num, 0) AS expose_person_num,
+        
+        -- 加购指标
+        0 AS add_cart_person,
+        0 AS add_cart,
+        
+        -- 订单指标
         COALESCE(od.order_user_count, 0) AS place_order_person,
         COALESCE(pd.pay_user_count, 0) AS pay_person,
         COALESCE(od.order_item_count, 0) AS place_order_num,
         COALESCE(pd.pay_num, 0) AS pay_num,
         COALESCE(od.order_amount, 0) AS place_order_amount,
         COALESCE(pd.pay_amount, 0) AS pay_amount,
-        -- 转化率
+        
+        -- 转化率指标
         CASE
           WHEN COALESCE(pe.expose_person_num, 0) > 0
           THEN ROUND(COALESCE(pd.pay_user_count, 0) / COALESCE(pe.expose_person_num, 0) * 100, 2)
           ELSE 0
         END AS single_prod_rate,
-        -- 退款指标（使用MySQL表中的字段名）
+        
+        -- 退款指标
         COALESCE(rd.refund_num, 0) AS refund_num,
         COALESCE(rd.refund_person, 0) AS refund_person,
         COALESCE(rd.refund_success_num, 0) AS refund_success_num,
@@ -221,20 +240,36 @@ object HiveRealtimeProductAnalysisJob {
           THEN ROUND(COALESCE(rd.refund_success_num, 0) / COALESCE(rd.refund_num, 0) * 100, 2)
           ELSE 0
         END AS refund_success_rate,
-        -- 状态和额外字段
-        COALESCE(pi.status, oi.status, p.status, 0) as status,
-        $statusFilter AS status_filter,
+        
+        -- 商品状态和过滤
+        CAST(COALESCE(pi.status, oi.status, p.status, '0') AS INT) as status,
+        CASE 
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '-1' THEN '删除'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '0' THEN '商家下架'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '1' THEN '上架'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '2' THEN '平台下架'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '3' THEN '违规下架待审核'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '6' THEN '待审核'
+          WHEN COALESCE(pi.status, oi.status, p.status, '0') = '7' THEN '草稿状态'
+          ELSE ''
+        END AS prod_status,
+        '$statusFilter' AS status_filter,
+        
+        -- 维度和时间
+        '$dateStr' AS stat_date,
+        
+        -- 商品信息
         COALESCE(p.prod_name, oi.prod_name, CONCAT('商品_', p.prod_id)) as prod_name,
-        COALESCE(sd.shop_name, CONCAT('商家_', p.shop_id)) AS shop_name,
-        '$dateStr' AS stat_date
+        COALESCE(p.pic, '') AS prod_url,
+        COALESCE(sd.shop_name, CONCAT('商家_', p.shop_id)) AS shop_name
       FROM (
         -- 商品信息作为主表
-        SELECT prod_id, shop_id, prod_name, price, status
+        SELECT prod_id, shop_id, prod_name, price, supplier_price, status, pic
         FROM (
           SELECT
-            prod_id, shop_id, prod_name, price, status,
+            prod_id, shop_id, prod_name, price, supplier_price, status, pic,
             ROW_NUMBER() OVER (PARTITION BY prod_id, shop_id ORDER BY update_time DESC) as rn
-          FROM mall_bbc.t_ods_tz_prod
+          FROM mall_bbc.t_dwd_prod_full
         ) t WHERE rn = 1
       ) p
       LEFT JOIN (
@@ -256,7 +291,7 @@ object HiveRealtimeProductAnalysisJob {
         SELECT DISTINCT
           shop_id,
           first_value(shop_name) OVER (PARTITION BY shop_id ORDER BY shop_name) AS shop_name
-        FROM mall_bbc.t_ods_tz_shop_detail
+        FROM mall_bbc.t_dwd_shop_detail_full
       ) sd ON p.shop_id = sd.shop_id
       LEFT JOIN (
         -- 从订单表获取商品基础信息（优先级最高，因为能关联上）
@@ -365,5 +400,29 @@ object HiveRealtimeProductAnalysisJob {
           OR COALESCE(rd.refund_success_amount, 0) > 0)
       ORDER BY status_filter ASC, COALESCE(pe.expose_count, 0) DESC, COALESCE(od.order_amount, 0) DESC
       """
+  }
+  
+  /**
+   * 获取跨天处理的时间范围
+   */
+  def getTimeRange(): (String, String, String, Int) = {
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val timeFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+    val cal = Calendar.getInstance()
+    val currentHour = cal.get(Calendar.HOUR_OF_DAY)
+    val today = dateFormat.format(cal.getTime())
+    
+    val (startTime, endTime, processDate) = if (currentHour == 0) {
+      // 凌晨0点时，处理昨天全天数据
+      cal.add(Calendar.DAY_OF_MONTH, -1)
+      val yesterday = dateFormat.format(cal.getTime())
+      (s"$yesterday 00:00:00", s"$yesterday 23:59:59", yesterday)
+    } else {
+      // 其他时间，处理今天从0点到当前时间的数据
+      val currentTime = timeFormat.format(cal.getTime())
+      (s"$today 00:00:00", currentTime, today)
+    }
+    
+    (startTime, endTime, processDate, currentHour)
   }
 }

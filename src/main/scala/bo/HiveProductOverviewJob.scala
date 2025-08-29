@@ -21,25 +21,37 @@ object HiveProductOverviewJob {
       val connection = Constants.DatabaseUtils.getWriteConnection
       val stmt = connection.createStatement()
       
-      // 根据时间周期使用不同的删除条件
+      // 根据时间周期使用不同的删除条件（增加更严格的校验和防护）
       val deleteSQL = timePeriod match {
         case "7" =>
           // 7天数据：只保留最新一份，删除所有7天数据
+          println(s"匹配到7天数据删除逻辑")
           s"DELETE FROM `$tableName` WHERE time_period = '7'"
         case "30" =>
-          // 30天数据：只保留最新一份，删除所有30天数据
+          // 30天数据：只保留最新一份，删除所有30天数据  
+          println(s"匹配到30天数据删除逻辑")
           s"DELETE FROM `$tableName` WHERE time_period = '30'"
-        case monthId if monthId.matches("\\d{6}") =>
+        case monthId if monthId.matches("\\d{6}") && monthId.length == 6 =>
           // 自然月（YYYYMM格式）：删除当前月份的数据，保留其他月份
+          println(s"匹配到自然月删除逻辑，月份ID: $monthId")
           s"DELETE FROM `$tableName` WHERE time_period = '$timePeriod'"
-        case _ =>
-          // 其他情况：只删除相同stat_date的数据
-          s"DELETE FROM `$tableName` WHERE stat_date = '$statDate'"
+        case unknown =>
+          // 其他情况：为了安全，只删除相同stat_date和time_period的数据
+          println(s"⚠️ 警告：未识别的time_period格式: '$unknown'，使用安全删除策略")
+          println(s"   time_period长度: ${unknown.length}")
+          println(s"   time_period字符: ${unknown.toCharArray.mkString(", ")}")
+          s"DELETE FROM `$tableName` WHERE stat_date = '$statDate' AND time_period = '$timePeriod'"
       }
       
-      println(s"执行删除SQL: $deleteSQL")
+      println(s"=== 准备执行删除操作 ===")
+      println(s"表名: $tableName")
+      println(s"统计日期: $statDate") 
+      println(s"时间周期: $timePeriod")
+      println(s"删除SQL: $deleteSQL")
+      println(s"===========================")
+      
       val deletedRows = stmt.executeUpdate(deleteSQL)
-      println(s"从 $tableName 表中删除了 $deletedRows 行数据 (日期: $statDate, 时间周期: $timePeriod)")
+      println(s"✓ 从 $tableName 表中删除了 $deletedRows 行数据 (日期: $statDate, 时间周期: $timePeriod)")
       
       stmt.close()
       connection.close()
@@ -106,6 +118,15 @@ object HiveProductOverviewJob {
     try {
       // 计算时间范围
       val (startTime, endTime, dateStr, timePeriod) = calculateTimeRange(timeRangeType)
+      
+      // 增加调试信息
+      println(s"=== 时间范围计算结果 ===")
+      println(s"timeRangeType: $timeRangeType")
+      println(s"timePeriod: $timePeriod")
+      println(s"startTime: $startTime")
+      println(s"endTime: $endTime")
+      println(s"dateStr: $dateStr")
+      println(s"========================")
       
       println(s"分析时间范围: $startTime 至 $endTime")
       

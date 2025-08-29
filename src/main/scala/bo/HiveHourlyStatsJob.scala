@@ -1,9 +1,8 @@
 package bo
 
-import dao.MyHive
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.{DataFrame, SparkSession}
-
+import dao.MyHive
 import java.text.SimpleDateFormat
 import java.util.Calendar
 
@@ -15,6 +14,17 @@ import java.util.Calendar
  */
 object HiveHourlyStatsJob {
 
+  /**
+   * 显示时间范围说明
+   */
+  def displayTimeRanges(startTime: String, endTime: String): Unit = {
+    println("\n======= 时间范围说明 =======")
+    println(s"按小时统计: $startTime 至 $endTime")
+    println("注意: 每小时调度模式，读取今天从00:00到当前时间的所有数据")
+    println("数据保留策略: 滚动保留最近2天（昨天+今天）")
+    println("==========================\n")
+  }
+  
   /**
    * 写入DataFrame到MySQL表，适配每小时调度的滚动2天数据策略
    */
@@ -72,23 +82,15 @@ object HiveHourlyStatsJob {
     val spark: SparkSession = MyHive.conn
 
     try {
-      // 设置时间范围为今天一天，按小时分区
-      val dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
-      val dayFormat = new SimpleDateFormat("yyyy-MM-dd")
-
-      val cal = Calendar.getInstance()
-      val today = dayFormat.format(cal.getTime())
+      // 跨天处理逻辑
+      val (startTime, endTime, processDate, currentHour) = getTimeRange()
       
-      // 获取当前时间，读取今天00:00:00到当前时间的数据
-      val now = Calendar.getInstance()
-      val currentTime = dateFormat.format(now.getTime())
+      println(s"小时级统计分析: $processDate")
+      println(s"时间范围: $startTime 至 $endTime (当前小时: $currentHour)")
       
-      val startTime = s"$today 00:00:00"
-      val endTime = currentTime // 读取到当前时间
-      
-      println(s"处理今天按小时分区数据，日期: $today")
-      println(s"时间范围: $startTime 至 $endTime")
-      println("注意: 每小时调度模式，读取今天00:00到当前时间的所有数据")
+      println(s"处理按小时分区数据，日期: $processDate")
+      // 显示时间范围说明
+      displayTimeRanges(startTime, endTime)
 
       // 切换到mall_bbc数据库
       spark.sql("USE mall_bbc")
@@ -101,14 +103,14 @@ object HiveHourlyStatsJob {
             shop_id, 
             COUNT(*) AS order_count,
             SUM(CAST(actual_total AS DECIMAL(18,2))) as pay_actual_total,
-            '$today' AS stat_date
-        FROM t_dwd_order_inc
+            '$processDate' AS stat_date
+        FROM mall_bbc.t_dwd_order_inc
         WHERE is_payed = '1'
         AND pay_time >= '$startTime'
         AND pay_time <= '$endTime'
         AND shop_id IS NOT NULL
         AND shop_id != ''
-        AND dt = '$today'
+        AND dt = '$processDate'
         GROUP BY FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'yyyy-MM-dd'),
                  FROM_UNIXTIME(UNIX_TIMESTAMP(pay_time, 'yyyy-MM-dd HH:mm:ss'), 'HH'),
                  shop_id
@@ -123,11 +125,11 @@ object HiveHourlyStatsJob {
         hourlyOrderPaymentDF.show(50, false)
         
         // 写入MySQL，使用每小时调度的滚动删除策略
-        writeToMySQLWithHourlySchedule(hourlyOrderPaymentDF, "tz_bd_merchant_hourly_stats", today)
-        println(s"今天($today)按小时分区的增量订单支付数据处理完成")
-        println("表中现在保持最近2天的小时级数据（昨天+今天）")
+        writeToMySQLWithHourlySchedule(hourlyOrderPaymentDF, "tz_bd_merchant_hourly_stats", processDate)
+        println(s"处理日期($processDate)按小时分区的增量订单支付数据处理完成")
+        println("表中现在保持最近2天的小时级数据")
       } else {
-        println(s"今天($today)无增量订单支付数据")
+        println(s"处理日期($processDate)无增量订单支付数据")
       }
 
     } catch {
@@ -138,5 +140,29 @@ object HiveHourlyStatsJob {
       spark.stop()
       println("Spark会话已关闭")
     }
+  }
+  
+  /**
+   * 获取跨天处理的时间范围
+   */
+  def getTimeRange(): (String, String, String, Int) = {
+    val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
+    val timeFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+    val cal = Calendar.getInstance()
+    val currentHour = cal.get(Calendar.HOUR_OF_DAY)
+    val today = dateFormat.format(cal.getTime())
+    
+    val (startTime, endTime, processDate) = if (currentHour == 0) {
+      // 凌晨0点时，处理昨天全天数据
+      cal.add(Calendar.DAY_OF_MONTH, -1)
+      val yesterday = dateFormat.format(cal.getTime())
+      (s"$yesterday 00:00:00", s"$yesterday 23:59:59", yesterday)
+    } else {
+      // 其他时间，处理今天从0点到当前时间的数据
+      val currentTime = timeFormat.format(cal.getTime())
+      (s"$today 00:00:00", currentTime, today)
+    }
+    
+    (startTime, endTime, processDate, currentHour)
   }
 } 

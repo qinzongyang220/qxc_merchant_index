@@ -1,9 +1,8 @@
 package bo
 
-import dao.MyHive
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.sql.{DataFrame, SparkSession}
-
+import dao.MyHive
 import java.text.SimpleDateFormat
 import java.util.Calendar
 
@@ -123,10 +122,10 @@ object HiveProductAnalysisQueryJob {
    */
   def generateCreateTableSQL(tableName: String, timeRangeType: String): String = {
     val comment = timeRangeType match {
-      case "7days" => "商品洞察-7天"
-      case "30days" => "商品洞察-30天" 
-      case "thisMonth" => "商品洞察-自然月"
-      case _ => "商品洞察"
+      case "7days" => "商家端-商品洞察-近7天"
+      case "30days" => "商家端-商品洞察-近30天"
+      case "thisMonth" => "商家端-商品洞察-自然月"
+      case _ => "商家端-商品洞察"
     }
     
     s"""
@@ -135,30 +134,54 @@ object HiveProductAnalysisQueryJob {
       `prod_id` BIGINT(20) NOT NULL COMMENT '商品ID',
       `shop_id` BIGINT(20) NOT NULL COMMENT '商店ID',
       `price` DECIMAL(18,2) DEFAULT NULL COMMENT '商品价格',
+      `supplier_price` DECIMAL(18,2) DEFAULT NULL COMMENT '供应商价格',
+      
+      -- 曝光指标
       `expose` BIGINT(20) DEFAULT 0 COMMENT '曝光次数',
       `expose_person_num` BIGINT(20) DEFAULT 0 COMMENT '曝光人数',
+      
+      -- 加购指标
+      `add_cart_person` BIGINT(20) DEFAULT 0 COMMENT '加购人数',
+      `add_cart` BIGINT(20) DEFAULT 0 COMMENT '加购件数',
+      
+      -- 订单指标
       `place_order_person` BIGINT(20) DEFAULT 0 COMMENT '下单人数',
       `pay_person` BIGINT(20) DEFAULT 0 COMMENT '支付人数',
       `place_order_num` BIGINT(20) DEFAULT 0 COMMENT '下单件数',
       `pay_num` BIGINT(20) DEFAULT 0 COMMENT '支付件数',
       `place_order_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '下单金额',
       `pay_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '支付金额',
+      
+      -- 转化率指标
       `single_prod_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '单品转化率(%)',
+      
+      -- 退款指标
       `refund_num` BIGINT(20) DEFAULT 0 COMMENT '申请退款订单数',
       `refund_person` BIGINT(20) DEFAULT 0 COMMENT '申请退款人数',
       `refund_success_num` BIGINT(20) DEFAULT 0 COMMENT '成功退款订单数',
       `refund_success_person` BIGINT(20) DEFAULT 0 COMMENT '成功退款人数',
       `refund_success_amount` DECIMAL(18,2) DEFAULT 0.00 COMMENT '成功退款金额',
       `refund_success_rate` DECIMAL(5,2) DEFAULT 0.00 COMMENT '退款成功率(%)',
-      `status` INT(11) DEFAULT NULL COMMENT '商品状态',
-      `status_filter` VARCHAR(50) DEFAULT NULL COMMENT '状态过滤器',
+      
+      -- 商品状态和过滤
+      `status` INT(11) DEFAULT NULL COMMENT '商品状态编码',
+      `prod_status` VARCHAR(50) DEFAULT NULL COMMENT '商品状态描述',
+      `status_filter` VARCHAR(50) DEFAULT NULL COMMENT '状态过滤器(0:全部,1:出售中,2:仓库中,3:已售空)',
+      
+      -- 维度和时间
+      `stat_date` VARCHAR(50) NOT NULL COMMENT '统计日期',
+      
+      -- 商品信息
       `prod_name` VARCHAR(500) DEFAULT NULL COMMENT '商品名称',
+      `prod_url` VARCHAR(500) DEFAULT NULL COMMENT '商品URL',
       `shop_name` VARCHAR(200) DEFAULT NULL COMMENT '商店名称',
-      `stat_date` DATE NOT NULL COMMENT '统计日期',
+      
       PRIMARY KEY (`id`),
-      UNIQUE KEY `uk_prod_shop_statdate_status` (`prod_id`, `shop_id`, `stat_date`, `status_filter`),
+      UNIQUE KEY `uk_prod_stat_date_status_time` (`prod_id`, `shop_id`, `stat_date`, `status_filter`),
       KEY `idx_stat_date` (`stat_date`),
-      KEY `idx_shop_id` (`shop_id`)
+      KEY `idx_status_filter` (`status_filter`),
+      KEY `idx_shop_id` (`shop_id`),
+      KEY `idx_prod_id` (`prod_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='$comment'
     """.trim
   }
@@ -191,6 +214,9 @@ object HiveProductAnalysisQueryJob {
       println(s"时间范围: ${timeRanges.mkString(", ")}")
       println(s"状态分区: ${statusFilters.mkString(", ")}")
       
+      // 显示所有时间范围的具体时间段
+      displayTimeRanges(timeRanges)
+      
       // 对每个时间范围处理所有状态，然后写入对应的表
       for (timeRange <- timeRanges) {
         println(s"\n处理时间范围: $timeRange")
@@ -208,6 +234,24 @@ object HiveProductAnalysisQueryJob {
       spark.stop()
       println("Spark会话已关闭")
     }
+  }
+  
+  /**
+   * 显示所有时间范围的具体时间段
+   */
+  def displayTimeRanges(timeRanges: List[String]): Unit = {
+    println("\n======= 时间范围说明 =======")
+    for (timeRange <- timeRanges) {
+      val (startTime, endTime, _) = calculateTimeRange(timeRange)
+      val description = timeRange match {
+        case "7days" => "近7天"
+        case "30days" => "近30天"  
+        case "thisMonth" => "本月自然月"
+        case _ => timeRange
+      }
+      println(s"$description ($timeRange): $startTime 至 $endTime")
+    }
+    println("==========================\n")
   }
   
   /**
@@ -335,6 +379,14 @@ object HiveProductAnalysisQueryJob {
     val dateFormat = new SimpleDateFormat("yyyy-MM-dd")
     val cal = Calendar.getInstance()
     
+    // 打印当前系统时间用于调试
+    println(s"=== 时间计算调试信息 ===")
+    println(s"当前系统时间: ${new java.util.Date()}")
+    println(s"Calendar当前时间: ${cal.getTime()}")
+    println(s"格式化当前日期: ${dateFormat.format(cal.getTime())}")
+    println(s"时间范围类型: $timeRangeType")
+    println(s"=========================")
+    
     timeRangeType match {
       case "thisMonth" =>
         // 自然月：如果今天是1号，分析上个月完整数据；否则分析本月1号到昨天的数据
@@ -371,12 +423,12 @@ object HiveProductAnalysisQueryJob {
           val startTime = s"$monthStart 00:00:00"
           val endTime = s"$yesterday 23:59:59"
           
-          (startTime, endTime, yesterday)
+          (startTime, endTime, yesterday) // 自然月：数据范围和stat_date都是昨天
         }
         
       case "7days" =>
         // 近7天：过去7天，以昨天为终止日期
-        val today = cal.getTime()
+        val todayStr = dateFormat.format(cal.getTime()) // 今天的日期（用于stat_date）
         cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
         val endDate = dateFormat.format(cal.getTime())
         cal.add(Calendar.DAY_OF_MONTH, -6) // 再往前6天，总共7天
@@ -384,14 +436,11 @@ object HiveProductAnalysisQueryJob {
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
         
-        // 分区使用今天日期（运行时间）
-        cal.setTime(today)
-        val runDate = dateFormat.format(cal.getTime())
-        (startTime, endTime, runDate)
+        (startTime, endTime, todayStr) // 数据范围到昨天，但stat_date用今天
         
       case "30days" =>
         // 近30天：过去30天，以昨天为终止日期
-        val today = cal.getTime()
+        val todayStr = dateFormat.format(cal.getTime()) // 今天的日期（用于stat_date）
         cal.add(Calendar.DAY_OF_MONTH, -1) // 先到昨天
         val endDate = dateFormat.format(cal.getTime())
         cal.add(Calendar.DAY_OF_MONTH, -29) // 再往前29天，总共30天
@@ -399,10 +448,7 @@ object HiveProductAnalysisQueryJob {
         val startTime = s"$startDate 00:00:00"
         val endTime = s"$endDate 23:59:59"
         
-        // 分区使用今天日期（运行时间）
-        cal.setTime(today)
-        val runDate = dateFormat.format(cal.getTime())
-        (startTime, endTime, runDate)
+        (startTime, endTime, todayStr) // 数据范围到昨天，但stat_date用今天
         
       case _ =>
         throw new IllegalArgumentException(s"不支持的时间范围类型: $timeRangeType")
@@ -427,9 +473,9 @@ object HiveProductAnalysisQueryJob {
       if (timeRangeType == "yesterday") {
         val dateOnly = dateStr  // dateStr应该是 yyyy-MM-dd 格式
         (
-          s"o.create_time LIKE '$dateOnly%'",
-          s"o.pay_time LIKE '$dateOnly%'", 
-          s"r.apply_time LIKE '$dateOnly%'",
+          s"create_time LIKE '$dateOnly%'",
+          s"pay_time LIKE '$dateOnly%'", 
+          s"apply_time LIKE '$dateOnly%'",
           s"dt = '$dateOnly'"
         )
       } else {
@@ -437,9 +483,9 @@ object HiveProductAnalysisQueryJob {
         val startDate = startTime.split(" ")(0)  // 从 "yyyy-MM-dd HH:mm:ss" 中提取日期部分
         val endDate = endTime.split(" ")(0)
         (
-          s"o.create_time >= '$startTime' AND o.create_time <= '$endTime'",
-          s"o.pay_time >= '$startTime' AND o.pay_time <= '$endTime'",
-          s"r.apply_time >= '$startTime' AND r.apply_time <= '$endTime'",
+          s"create_time BETWEEN '$startTime' AND '$endTime'",
+          s"pay_time BETWEEN '$startTime' AND '$endTime'",
+          s"apply_time BETWEEN '$startTime' AND '$endTime'",
           s"dt >= '$startDate' AND dt <= '$endDate'"
         )
       }
@@ -462,35 +508,73 @@ object HiveProductAnalysisQueryJob {
         GROUP BY CAST(prodid AS BIGINT), CAST(shopid AS BIGINT)
       ),
       
+      -- 直接去重完全相同的记录
+      deduplicated_orders AS (
+        SELECT DISTINCT
+          order_id,
+          order_number,
+          user_id,
+          shop_id,
+          create_time,
+          pay_time,
+          is_payed,
+          actual_total
+        FROM mall_bbc.t_dwd_order_full
+        WHERE $orderTimeCondition
+      ),
+      
+      deduplicated_order_items AS (
+        SELECT DISTINCT
+          order_item_id,
+          order_number,
+          prod_id,
+          shop_id,
+          prod_count,
+          actual_total,
+          rec_time
+        FROM mall_bbc.t_dwd_order_item_full
+      ),
+      
       order_data AS (
-        -- 下单数据
+        -- 下单数据：使用去重后的数据
         SELECT
           oi.prod_id,
           o.shop_id,
           COUNT(DISTINCT o.user_id) AS order_user_count,
           SUM(CAST(oi.prod_count AS INT)) AS order_item_count,
           SUM(CAST(oi.actual_total AS DECIMAL(18,2))) AS order_amount
-        FROM mall_bbc.t_ods_tz_order o
-        JOIN mall_bbc.t_ods_tz_order_item oi ON o.order_number = oi.order_number
-        WHERE $orderTimeCondition
-          AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
+        FROM deduplicated_order_items oi
+        JOIN deduplicated_orders o ON oi.order_number = o.order_number
         GROUP BY oi.prod_id, o.shop_id
       ),
       
       pay_data AS (
-        -- 支付数据
+        -- 支付数据：使用去重后的数据
         SELECT
           oi.prod_id,
           o.shop_id,
           COUNT(DISTINCT o.user_id) AS pay_user_count,
           SUM(CAST(oi.prod_count AS INT)) AS pay_num,
           SUM(CAST(oi.actual_total AS DECIMAL(18,2))) AS pay_amount
-        FROM mall_bbc.t_ods_tz_order o
-        JOIN mall_bbc.t_ods_tz_order_item oi ON o.order_number = oi.order_number
+        FROM deduplicated_orders o
+        JOIN deduplicated_order_items oi ON o.order_number = oi.order_number
         WHERE o.is_payed = 'true'
           AND $payTimeCondition
-          AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
         GROUP BY oi.prod_id, o.shop_id
+      ),
+      
+      deduplicated_refunds AS (
+        SELECT DISTINCT
+          refund_id,
+          order_id,
+          order_item_id,
+          user_id,
+          refund_type,
+          return_money_sts,
+          refund_amount,
+          apply_time
+        FROM mall_bbc.t_dwd_order_refund_full
+        WHERE $refundTimeCondition
       ),
       
       refund_single AS (
@@ -501,11 +585,9 @@ object HiveProductAnalysisQueryJob {
           r.user_id,
           r.return_money_sts,
           r.refund_amount
-        FROM mall_bbc.t_ods_tz_order_refund r
-        LEFT JOIN mall_bbc.t_ods_tz_order_item oi ON r.order_item_id = oi.order_item_id
-        WHERE $refundTimeCondition
-          AND r.refund_type = '2'
-          AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
+        FROM deduplicated_refunds r
+        LEFT JOIN deduplicated_order_items oi ON r.order_item_id = oi.order_item_id
+        WHERE r.refund_type = '2'
           AND oi.prod_id IS NOT NULL
           AND oi.shop_id IS NOT NULL
       ),
@@ -518,13 +600,10 @@ object HiveProductAnalysisQueryJob {
           r.user_id,
           r.return_money_sts,
           r.refund_amount
-        FROM mall_bbc.t_ods_tz_order_refund r
-        JOIN mall_bbc.t_ods_tz_order o ON r.order_id = o.order_id
-        JOIN mall_bbc.t_ods_tz_order_item oi ON o.order_number = oi.order_number
-        WHERE $refundTimeCondition
-          AND r.refund_type = '1'
-          AND $orderTimeCondition
-          AND oi.rec_time >= '$startTime' AND oi.rec_time <= '$endTime'
+        FROM deduplicated_refunds r
+        JOIN deduplicated_orders o ON r.order_id = o.order_id
+        JOIN deduplicated_order_items oi ON o.order_number = oi.order_number
+        WHERE r.refund_type = '1'
           AND oi.prod_id IS NOT NULL
           AND oi.shop_id IS NOT NULL
       ),
@@ -550,20 +629,32 @@ object HiveProductAnalysisQueryJob {
         p.prod_id,
         p.shop_id,
         CAST(p.price AS DECIMAL(18,2)) AS price,
-        -- 按照原来的字段名
+        CAST(p.supplier_price AS DECIMAL(18,2)) AS supplier_price,
+        
+        -- 曝光指标
         COALESCE(pe.expose_count, 0) AS expose,
         COALESCE(pe.expose_person_num, 0) AS expose_person_num,
+        
+        -- 加购指标
+        0 AS add_cart_person,
+        0 AS add_cart,
+        
+        -- 订单指标
         COALESCE(od.order_user_count, 0) AS place_order_person,
         COALESCE(pd.pay_user_count, 0) AS pay_person,
         COALESCE(od.order_item_count, 0) AS place_order_num,
         COALESCE(pd.pay_num, 0) AS pay_num,
         COALESCE(od.order_amount, 0) AS place_order_amount,
         COALESCE(pd.pay_amount, 0) AS pay_amount,
+        
+        -- 转化率指标
         CASE
           WHEN COALESCE(pe.expose_person_num, 0) > 0
           THEN ROUND(COALESCE(pd.pay_user_count, 0) / COALESCE(pe.expose_person_num, 0) * 100, 2)
           ELSE 0
         END AS single_prod_rate,
+        
+        -- 退款指标
         COALESCE(rd.refund_num, 0) AS refund_num,
         COALESCE(rd.refund_person, 0) AS refund_person,
         COALESCE(rd.refund_success_num, 0) AS refund_success_num,
@@ -574,12 +665,28 @@ object HiveProductAnalysisQueryJob {
           THEN ROUND(COALESCE(rd.refund_success_num, 0) / COALESCE(rd.refund_num, 0) * 100, 2)
           ELSE 0
         END AS refund_success_rate,
-        p.status AS status,
+        
+        -- 商品状态和过滤
+        CAST(p.status AS INT) AS status,
+        CASE 
+          WHEN p.status = '-1' THEN '删除'
+          WHEN p.status = '0' THEN '商家下架'
+          WHEN p.status = '1' THEN '上架'
+          WHEN p.status = '2' THEN '平台下架'
+          WHEN p.status = '3' THEN '违规下架待审核'
+          WHEN p.status = '6' THEN '待审核'
+          WHEN p.status = '7' THEN '草稿状态'
+          ELSE ''
+        END AS prod_status,
+        '$statusFilter' AS status_filter,
+        
+        -- 维度和时间
         '$dateStr' AS stat_date,
-        -- 添加额外字段
-        $statusFilter AS status_filter,
-        p.prod_name AS prod_name,
-        sd.shop_name AS shop_name
+        
+        -- 商品信息
+        COALESCE(p.prod_name, '') AS prod_name,
+        COALESCE(p.pic, '') AS prod_url,
+        COALESCE(sd.shop_name, '') AS shop_name
       FROM (
         -- 只取每个商品的最新记录
         SELECT 
@@ -587,22 +694,26 @@ object HiveProductAnalysisQueryJob {
           shop_id,
           prod_name,
           price,
-          status
+          supplier_price,
+          status,
+          pic
         FROM (
           SELECT 
             prod_id,
             shop_id,
             prod_name,
             price,
+            supplier_price,
             status,
+            pic,
             ROW_NUMBER() OVER (PARTITION BY prod_id, shop_id ORDER BY update_time DESC) as rn
-          FROM mall_bbc.t_ods_tz_prod
+          FROM mall_bbc.t_dwd_prod_full
         ) t 
         WHERE rn = 1
       ) p
       LEFT JOIN (
         SELECT DISTINCT shop_id, first_value(shop_name) OVER (PARTITION BY shop_id ORDER BY shop_name) AS shop_name
-        FROM mall_bbc.t_ods_tz_shop_detail
+        FROM mall_bbc.t_dwd_shop_detail_full
       ) sd ON sd.shop_id = p.shop_id
       LEFT JOIN product_exposure pe ON p.prod_id = pe.prod_id AND p.shop_id = pe.shop_id
       LEFT JOIN order_data od ON p.prod_id = od.prod_id AND p.shop_id = od.shop_id
